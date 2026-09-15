@@ -548,6 +548,14 @@ export const uploadVideo = (req, res) => {
       });
     }
 
+    const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || Boolean(process.env.VERCEL);
+    if (isVercel) {
+      return res.status(501).json({
+        success: false,
+        error: 'Local filesystem video upload is not supported in Vercel serverless environment. Please use cloud storage or an embed URL (e.g., YouTube/Vimeo).'
+      });
+    }
+
     const videoPath = `/uploads/videos/${req.file.filename}`;
     return res.json({
       success: true,

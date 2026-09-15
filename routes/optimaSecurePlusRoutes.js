@@ -24,22 +24,42 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Detect Vercel Serverless environment
+const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || Boolean(process.env.VERCEL);
+
 // Configure multer storage for video uploads
 const uploadsDir = path.join(__dirname, '..', 'uploads', 'videos');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+
+// In local/non-serverless environment, ensure uploads directory exists
+if (!isVercel) {
+  try {
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+  } catch (err) {
+    console.warn('[Storage] Warning creating local uploads directory:', err.message);
+  }
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const cleanName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
-    cb(null, `${cleanName}_${Date.now()}${ext}`);
-  }
-});
+const storage = isVercel
+  ? multer.memoryStorage()
+  : multer.diskStorage({
+      destination: (req, file, cb) => {
+        try {
+          if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+          }
+          cb(null, uploadsDir);
+        } catch (err) {
+          cb(err, uploadsDir);
+        }
+      },
+      filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase();
+        const cleanName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+        cb(null, `${cleanName}_${Date.now()}${ext}`);
+      }
+    });
 
 const fileFilter = (req, file, cb) => {
   const allowedExts = ['.mp4', '.webm', '.ogg', '.mov', '.mkv'];
