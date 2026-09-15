@@ -16,6 +16,13 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  'https://why-insured.vercel.app',
+  ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(s => s.trim()) : [])
+];
 
 // Auto-seed database with Optima Secure+ data if not already seeded
 seedDatabase();
@@ -23,13 +30,21 @@ seedDatabase();
 // Middleware
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, Postman)
+    // Allow requests with no origin (like mobile apps, curl, Postman, server-side fetch)
     if (!origin) return callback(null, true);
-    // Allow localhost and specified CORS_ORIGIN
-    if (origin.includes('localhost') || origin.includes('127.0.0.1') || origin === CORS_ORIGIN) {
+    
+    // Check if origin matches allowed list or vercel preview/custom domains
+    if (
+      ALLOWED_ORIGINS.includes(origin) ||
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin === 'https://why-insured.vercel.app' ||
+      origin.endsWith('.vercel.app')
+    ) {
       return callback(null, true);
     }
-    return callback(null, true); // Permissive for local dev
+    
+    return callback(null, true);
   },
   credentials: true
 }));
