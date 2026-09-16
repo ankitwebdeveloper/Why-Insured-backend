@@ -3,36 +3,203 @@
  * 
  * WHYINSURED Official-Source Policy Verification Engine.
  * 
- * Architecture:
- * 1. Primary Source: Uploaded policy PDF.
- * 2. If complete -> Answers directly from uploaded PDF.
- * 3. If incomplete/missing -> Triggers precision verification using official insurer policy wordings.
- * 4. Product matching: Enforces exact product name & insurer (rejects wrong plans or random blogs).
- * 5. Extracts exact official clause + Simple explanation + Clickable verified official source.
- * 6. Detects policy version differences without overwriting uploaded text.
- * 7. Zero hallucination: Explicitly reports unverifiable details when no official document exists.
+ * Strict Two-Tier Verification Flow:
+ * STEP 1: Search the uploaded PDF content first. If complete -> return direct answer from PDF.
+ * STEP 2: If incomplete / missing -> identify exact product (insurer, plan, variant, UIN).
+ * STEP 3: Search official policy documents via live search (DuckDuckGo / official registry).
+ * STEP 4: Filter sources to ONLY official insurer domains and IRDAI (reject blogs, comparison sites, aggregators).
+ * STEP 5: Fetch and read the official policy wording document (PDF / HTML).
+ * STEP 6: Extract the exact relevant clause matching the user's question.
+ * STEP 7: Generate simple English explanation + clickable official source link with version comparison.
+ * STEP 8: Zero-Hallucination fallback if document cannot be verified.
  */
 
 import dotenv from 'dotenv';
+import { extractTextFromPdf } from './policyPdfExtractor.js';
+
 dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODELS = [
   'gemini-flash-latest',
-  'gemini-2.5-flash',
   'gemini-3.6-flash',
+  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
   'gemini-3.1-flash-lite'
 ];
 
+// In-memory cache for fetched official documents to prevent redundant network downloads
+const officialDocumentCache = new Map();
+
 /**
- * Curated Official Insurer Product Repository for verified policy wordings & Customer Information Sheets (CIS)
- * Verified against official insurer domains (.hdfcergo.com, .tataaig.com, .careinsurance.com, .starhealth.in, .nivabupa.com, etc.)
+ * Insurer Official Domain Registry for Whitelist Validation
  */
-const OFFICIAL_PRODUCT_CATALOG = [
+export const INSURER_DOMAIN_WHITELIST = [
+  {
+    name: 'Tata AIG',
+    aliases: ['tata aig', 'tata', 'tataaig'],
+    domains: ['tataaig.com', 'tata-aig.com', 's3.tataaig.com']
+  },
+  {
+    name: 'HDFC ERGO',
+    aliases: ['hdfc ergo', 'hdfc', 'hdfcergo'],
+    domains: ['hdfcergo.com', 'hdfcinsurance.com']
+  },
+  {
+    name: 'Care Health Insurance',
+    aliases: ['care health', 'care', 'religare'],
+    domains: ['careinsurance.com', 'religarehealthinsurance.com']
+  },
+  {
+    name: 'Star Health',
+    aliases: ['star health', 'star', 'starhealth'],
+    domains: ['starhealth.in']
+  },
+  {
+    name: 'Niva Bupa',
+    aliases: ['niva bupa', 'max bupa', 'niva', 'bupa'],
+    domains: ['nivabupa.com', 'maxbupa.com']
+  },
+  {
+    name: 'ICICI Lombard',
+    aliases: ['icici lombard', 'icici'],
+    domains: ['icicilombard.com']
+  },
+  {
+    name: 'Aditya Birla Health',
+    aliases: ['aditya birla', 'aditya', 'birla health', 'abhealth'],
+    domains: ['adityabirlacapital.com', 'adityabirlahealth.com']
+  },
+  {
+    name: 'ManipalCigna',
+    aliases: ['manipal cigna', 'manipalcigna', 'cigna'],
+    domains: ['manipalcigna.com']
+  },
+  {
+    name: 'Bajaj Allianz',
+    aliases: ['bajaj allianz', 'bajaj'],
+    domains: ['bajajallianz.com']
+  },
+  {
+    name: 'SBI General',
+    aliases: ['sbi general', 'sbi'],
+    domains: ['sbigeneral.in']
+  },
+  {
+    name: 'Go Digit',
+    aliases: ['digit', 'godigit'],
+    domains: ['godigit.com', 'digitinsurance.com']
+  },
+  {
+    name: 'Acko',
+    aliases: ['acko'],
+    domains: ['acko.com']
+  },
+  {
+    name: 'Chola MS',
+    aliases: ['chola ms', 'cholamandalam'],
+    domains: ['cholamandalam.com', 'cholams.com']
+  },
+  {
+    name: 'National Insurance',
+    aliases: ['national insurance'],
+    domains: ['nationalinsurance.nic.co.in']
+  },
+  {
+    name: 'New India Assurance',
+    aliases: ['new india assurance', 'new india'],
+    domains: ['newindia.co.in']
+  },
+  {
+    name: 'Oriental Insurance',
+    aliases: ['oriental insurance', 'oriental'],
+    domains: ['orientalinsurance.org.in']
+  },
+  {
+    name: 'United India',
+    aliases: ['united india', 'uiic'],
+    domains: ['uiic.co.in']
+  },
+  {
+    name: 'IRDAI Official',
+    aliases: ['irdai', 'insurance regulatory and development authority', 'irda'],
+    domains: ['irdai.gov.in', 'policyholder.gov.in']
+  }
+];
+
+/**
+ * Strict Blacklist of Aggregators, Blogs, Affiliates, Forums, and Unofficial PDF Repositories
+ */
+export const BLACKLISTED_DOMAINS = [
+  'policybazaar.com',
+  'insurancedekho.com',
+  'coverfox.com',
+  'bankbazaar.com',
+  'turtlemint.com',
+  'joinditto.in',
+  'ditto.in',
+  'livemint.com',
+  'economictimes.indiatimes.com',
+  'moneycontrol.com',
+  'cleartax.in',
+  'paisabazaar.com',
+  'quora.com',
+  'reddit.com',
+  'youtube.com',
+  'facebook.com',
+  'scribd.com',
+  'medium.com',
+  'blogspot.com',
+  'wordpress.com',
+  'wikipedia.org',
+  'coursehero.com',
+  'studocu.com'
+];
+
+/**
+ * Pre-indexed curated official documents for immediate fallback and high-speed matching
+ */
+export const CURATED_OFFICIAL_CATALOG = [
+  {
+    insurer: 'Tata AIG General Insurance Company Limited',
+    aliases: ['tata aig', 'tata', 'tataaig'],
+    productName: 'MediCare Select',
+    variants: ['Select', 'Standard'],
+    uin: 'TATHLIP21234V022021',
+    officialDocumentTitle: 'Tata AIG MediCare Select Official Policy Wordings',
+    officialUrl: 'https://www.tataaig.com/health-insurance/medicare',
+    pdfWordingUrl: 'https://www.tataaig.com/s3/medicare_select_policy_wording_0faeeb61c5.pdf',
+    version: '2022-V01',
+    verifiedClauses: {
+      roomRent: {
+        feature: 'Room Rent & ICU Category',
+        clause: 'Inpatient Hospitalization covers room charges up to Single Private Room. In the event of admission to a higher room category, the Insured shall bear proportionate expenses of associated medical costs.',
+        simple: 'Single Private AC Room is covered in full. Choosing a higher room category triggers proportionate bill deductions.',
+        sourcePage: 8
+      },
+      restoration: {
+        feature: 'Cumulative Bonus & Restoration',
+        clause: 'Automatic restoration of Sum Insured up to 100% once in a policy year upon complete exhaustion of the Base Sum Insured for unrelated illnesses.',
+        simple: 'Refills your entire sum insured once per year if it gets exhausted, applicable for unrelated illnesses.',
+        sourcePage: 11
+      },
+      waitingPeriod: {
+        feature: 'Waiting Periods',
+        clause: '30 Days Initial Waiting Period. 24 Months for specific illnesses. 24–36 Months for Pre-Existing Diseases declared and accepted at inception.',
+        simple: '30 days initial wait, 2 years for specific surgeries, and 2 to 3 years for pre-existing diseases.',
+        sourcePage: 16
+      },
+      consumables: {
+        feature: 'Consumables & Non-Medical Items',
+        clause: 'Non-medical expenses and consumables listed in the standard exclusion list are excluded unless specifically covered under an active optional rider.',
+        simple: 'Consumable hospital items (gloves, PPE, masks) are not covered under base plan unless an optional rider is attached.',
+        sourcePage: 22
+      }
+    }
+  },
   {
     insurer: 'HDFC ERGO General Insurance Co. Ltd.',
-    aliases: ['hdfc ergo', 'hdfc'],
+    aliases: ['hdfc ergo', 'hdfc', 'hdfcergo'],
     productName: 'Optima Secure',
     variants: ['Individual', 'Family Floater', 'Optima Secure+'],
     uin: 'HDFHLIP22056V022122',
@@ -64,37 +231,6 @@ const OFFICIAL_PRODUCT_CATALOG = [
         clause: 'Under Protect Plus Add-on: Expenses incurred towards 68+ non-medical consumable items listed in Schedule II (gloves, PPE kits, admission kits) are 100% covered.',
         simple: 'All hospital consumables like PPE kits, gloves, and syringes are fully paid if the Protect Plus benefit is included.',
         sourcePage: 23
-      }
-    }
-  },
-  {
-    insurer: 'Tata AIG General Insurance Company Limited',
-    aliases: ['tata aig', 'tata'],
-    productName: 'MediCare Select',
-    variants: ['Select', 'Premier', 'Standard'],
-    uin: 'TATHLIP21234V022021',
-    officialDocumentTitle: 'Tata AIG MediCare Select Official Policy Wordings',
-    officialUrl: 'https://www.tataaig.com/health-insurance/medicare',
-    pdfWordingUrl: 'https://www.tataaig.com/downloads/policy-wording/medicare-select.pdf',
-    version: '2022-V01',
-    verifiedClauses: {
-      roomRent: {
-        feature: 'Room Rent & ICU Category',
-        clause: 'Inpatient Hospitalization covers room charges up to Single Private Room. In the event of admission to a higher room category, the Insured shall bear proportionate expenses of associated medical costs.',
-        simple: 'Single Private Room is covered in full. Choosing a higher room category triggers proportionate bill deductions.',
-        sourcePage: 8
-      },
-      restoration: {
-        feature: 'Cumulative Bonus & Restoration',
-        clause: 'Automatic restoration of Sum Insured up to 100% once in a policy year upon complete exhaustion of the Base Sum Insured for unrelated illnesses.',
-        simple: 'Refills your entire sum insured once per year if it gets exhausted, applicable for unrelated illnesses.',
-        sourcePage: 11
-      },
-      waitingPeriod: {
-        feature: 'Waiting Periods',
-        clause: '30 Days Initial Waiting Period. 24 Months for specific illnesses. 24–36 Months for Pre-Existing Diseases declared and accepted at inception.',
-        simple: '30 days initial wait, 2 years for specific surgeries, and 2 to 3 years for pre-existing diseases.',
-        sourcePage: 16
       }
     }
   },
@@ -133,7 +269,7 @@ const OFFICIAL_PRODUCT_CATALOG = [
     insurer: 'Star Health and Allied Insurance Co. Ltd.',
     aliases: ['star health', 'star'],
     productName: 'Star Comprehensive Insurance Policy',
-    variants: ['Comprehensive', 'Family Health Optima', 'Senior Citizen Red Carpet'],
+    variants: ['Comprehensive', 'Family Health Optima'],
     uin: 'SHAHLIP22028V072122',
     officialDocumentTitle: 'Star Comprehensive Official Policy Prospectus & Wording',
     officialUrl: 'https://www.starhealth.in/health-insurance/star-comprehensive-insurance-policy',
@@ -194,24 +330,285 @@ const OFFICIAL_PRODUCT_CATALOG = [
 ];
 
 /**
- * Match uploaded policy text against known official product catalog
+ * 1. identifyPolicyFromPDF()
+ * Extracts exact policy metadata from uploaded text and analysis data.
  */
-function findMatchingOfficialProduct(insurerText, productNameText, fullText) {
-  const combined = `${insurerText || ''} ${productNameText || ''} ${fullText || ''}`.toLowerCase();
+export function identifyPolicyFromPDF(fullText = '', analysisResult = {}) {
+  const details = analysisResult.policyDetails || {};
+  const identified = analysisResult.identifiedProduct || {};
 
-  for (const prod of OFFICIAL_PRODUCT_CATALOG) {
-    const insurerMatches = prod.aliases.some(alias => combined.includes(alias));
-    const prodNameMatches = combined.includes(prod.productName.toLowerCase());
+  let insurerName = identified.insurer || details.insurer || '';
+  let productName = identified.productName || details.policyName || '';
+  let variant = identified.variant || details.policyType || '';
+  let uin = identified.uin || null;
+  let policyVersion = identified.policyVersion || null;
+  let policyDate = identified.versionDate || details.periodOfInsurance || null;
 
-    if (insurerMatches && prodNameMatches) {
-      return prod;
+  // Regex extract UIN if missing (Format: e.g., TATHLIP21234V022021 or HDFHLIP22056V022122)
+  if (!uin && fullText) {
+    const uinMatch = fullText.match(/\b([A-Z]{3,8}(?:HLI|PA|GI|HI)[A-Z0-9]{5,18})\b/i);
+    if (uinMatch) {
+      uin = uinMatch[1].toUpperCase();
     }
   }
 
-  // Insurer-only fallback
-  for (const prod of OFFICIAL_PRODUCT_CATALOG) {
-    if (prod.aliases.some(alias => combined.includes(alias))) {
-      return prod;
+  // Deduce Insurer Name if generic
+  if (!insurerName || insurerName.toLowerCase().includes('health insurance') || insurerName.length < 4) {
+    const lowerDoc = fullText.toLowerCase();
+    for (const item of INSURER_DOMAIN_WHITELIST) {
+      if (item.aliases.some(a => lowerDoc.includes(a))) {
+        insurerName = item.name;
+        break;
+      }
+    }
+  }
+
+  // Deduce Product Name if generic
+  if (!productName || productName.toLowerCase().includes('health plan') || productName.toLowerCase().includes('standard plan')) {
+    for (const prod of CURATED_OFFICIAL_CATALOG) {
+      if (fullText.toLowerCase().includes(prod.productName.toLowerCase())) {
+        productName = prod.productName;
+        break;
+      }
+    }
+  }
+
+  return {
+    insurerName: insurerName || 'Health Insurance Company',
+    productName: productName || 'Health Policy',
+    variant: variant || null,
+    uin: uin || null,
+    policyVersion: policyVersion || null,
+    policyDate: policyDate || null
+  };
+}
+
+/**
+ * 2. searchOfficialPolicyDocuments()
+ * Builds targeted exact query and searches official documents via live search or curated catalog.
+ */
+export async function searchOfficialPolicyDocuments({ insurerName, productName, variant, uin, question }) {
+  const queries = [
+    `${insurerName} ${productName} ${uin || ''} policy wording PDF`.trim(),
+    `${insurerName} ${productName} official CIS policy wording`.trim(),
+    `${insurerName} ${productName} terms and conditions PDF`.trim()
+  ];
+
+  const candidateResults = [];
+
+  // Method A: Free DuckDuckGo HTML Search
+  try {
+    const primaryQuery = queries[0];
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(primaryQuery)}`;
+    
+    const res = await fetch(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      signal: AbortSignal.timeout(6000)
+    });
+
+    if (res.ok) {
+      const html = await res.text();
+      
+      // Parse search results links & snippets
+      const linkRegex = /<a class="result__url" href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+      const snippetRegex = /<a class="result__snippet[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+
+      const snippetsMap = new Map();
+      let snipMatch;
+      while ((snipMatch = snippetRegex.exec(html)) !== null) {
+        const rawHref = snipMatch[1];
+        const snippetText = snipMatch[2].replace(/<[^>]+>/g, '').trim();
+        snippetsMap.set(rawHref, snippetText);
+      }
+
+      let linkMatch;
+      while ((linkMatch = linkRegex.exec(html)) !== null) {
+        const rawHref = linkMatch[1];
+        const displayUrl = linkMatch[2].trim();
+
+        // Extract actual URL from DuckDuckGo redirection link
+        let decodedUrl = '';
+        if (rawHref.includes('uddg=')) {
+          const rawParam = rawHref.split('uddg=')[1].split('&')[0];
+          decodedUrl = decodeURIComponent(rawParam);
+        } else if (rawHref.startsWith('http')) {
+          decodedUrl = rawHref;
+        } else {
+          decodedUrl = `https://${displayUrl}`;
+        }
+
+        const snippet = snippetsMap.get(rawHref) || '';
+        candidateResults.push({
+          url: decodedUrl,
+          title: displayUrl,
+          snippet: snippet
+        });
+      }
+    }
+  } catch (err) {
+    // Network / timeout - proceed to fallback catalog
+  }
+
+  // Method B: Match against Curated Official Catalog
+  for (const prod of CURATED_OFFICIAL_CATALOG) {
+    const combined = `${insurerName} ${productName}`.toLowerCase();
+    const aliasMatches = prod.aliases.some(a => combined.includes(a));
+    const nameMatches = combined.includes(prod.productName.toLowerCase()) || prod.productName.toLowerCase().includes(productName.toLowerCase());
+
+    if (aliasMatches && nameMatches) {
+      candidateResults.unshift({
+        url: prod.pdfWordingUrl || prod.officialUrl,
+        title: prod.officialDocumentTitle,
+        snippet: `Official policy wording and terms for ${prod.insurer} - ${prod.productName}`,
+        catalogEntry: prod
+      });
+      break;
+    }
+  }
+
+  return candidateResults;
+}
+
+/**
+ * 3. filterOfficialSources()
+ * Filters candidates to ONLY allowed official insurer domains or IRDAI. Rejects aggregators/blogs.
+ */
+export function filterOfficialSources(candidates = [], insurerName = '') {
+  const cleanInsurer = (insurerName || '').toLowerCase();
+  
+  // Find allowed domains for this insurer
+  let allowedDomains = ['irdai.gov.in', 'policyholder.gov.in'];
+  for (const item of INSURER_DOMAIN_WHITELIST) {
+    if (item.aliases.some(a => cleanInsurer.includes(a)) || cleanInsurer.includes(item.name.toLowerCase())) {
+      allowedDomains = [...allowedDomains, ...item.domains];
+      break;
+    }
+  }
+
+  const validSources = [];
+
+  for (const cand of candidates) {
+    if (!cand.url || !cand.url.startsWith('http')) continue;
+
+    try {
+      const parsedUrl = new URL(cand.url);
+      const hostname = parsedUrl.hostname.toLowerCase().replace(/^www\./, '');
+
+      // Check Blacklist
+      const isBlacklisted = BLACKLISTED_DOMAINS.some(b => hostname.includes(b));
+      if (isBlacklisted) continue;
+
+      // Check Whitelist
+      const isWhitelisted = allowedDomains.some(d => hostname === d || hostname.endsWith(`.${d}`));
+      if (isWhitelisted) {
+        validSources.push({
+          ...cand,
+          domain: hostname,
+          isOfficial: true
+        });
+      }
+    } catch (e) {
+      // Invalid URL
+    }
+  }
+
+  return validSources;
+}
+
+/**
+ * 4. fetchOfficialDocument()
+ * Fetches the official document (PDF or HTML) and extracts text content.
+ */
+export async function fetchOfficialDocument(officialUrl) {
+  if (!officialUrl) return null;
+
+  // Check cache first
+  if (officialDocumentCache.has(officialUrl)) {
+    return officialDocumentCache.get(officialUrl);
+  }
+
+  try {
+    const res = await fetch(officialUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      },
+      signal: AbortSignal.timeout(12000)
+    });
+
+    if (!res.ok) return null;
+
+    const contentType = res.headers.get('content-type') || '';
+    let extractedText = '';
+
+    if (contentType.includes('application/pdf') || officialUrl.toLowerCase().endsWith('.pdf')) {
+      const arrayBuffer = await res.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const pdfData = await extractTextFromPdf(buffer);
+      extractedText = pdfData.fullText || '';
+    } else {
+      const html = await res.text();
+      // Clean HTML to text
+      extractedText = html
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    if (extractedText && extractedText.length > 50) {
+      officialDocumentCache.set(officialUrl, extractedText);
+      return extractedText;
+    }
+  } catch (err) {
+    // Return null on failure
+  }
+
+  return null;
+}
+
+/**
+ * 5. extractRelevantClause()
+ * Extracts the exact relevant clause matching the user's question from the official document.
+ */
+export function extractRelevantClause(documentText = '', question = '') {
+  if (!documentText || !question) return null;
+
+  const lowerDoc = documentText.toLowerCase();
+  const lowerQ = question.toLowerCase();
+
+  const keywords = [];
+  if (lowerQ.includes('room') || lowerQ.includes('rent') || lowerQ.includes('icu') || lowerQ.includes('sharing')) {
+    keywords.push('room rent', 'room category', 'single private', 'icu', 'inpatient hospitalization', 'in-patient hospitalization');
+  } else if (lowerQ.includes('restor') || lowerQ.includes('refill') || lowerQ.includes('recharge') || lowerQ.includes('exhaust')) {
+    keywords.push('restoration', 'restore', 'recharge', 'exhaustion of', 'cumulative bonus');
+  } else if (lowerQ.includes('wait') || lowerQ.includes('ped') || lowerQ.includes('pre-existing') || lowerQ.includes('bimari')) {
+    keywords.push('waiting period', 'pre-existing disease', 'ped', 'specific illness');
+  } else if (lowerQ.includes('consumable') || lowerQ.includes('glove') || lowerQ.includes('ppe') || lowerQ.includes('syringe')) {
+    keywords.push('consumables', 'non-medical', 'schedule ii', 'protect plus');
+  } else if (lowerQ.includes('cataract') || lowerQ.includes('hernia') || lowerQ.includes('joint') || lowerQ.includes('surgery')) {
+    keywords.push('specific disease', '24 months', 'two years', 'cataract', 'joint replacement');
+  } else {
+    // Extract significant query words
+    const words = lowerQ.split(/\s+/).filter(w => w.length > 3 && !['what', 'when', 'which', 'where', 'does', 'policy', 'health', 'insurance'].includes(w));
+    keywords.push(...words);
+  }
+
+  for (const kw of keywords) {
+    const idx = lowerDoc.indexOf(kw);
+    if (idx !== -1) {
+      // Find sentence / clause boundary
+      const start = Math.max(0, documentText.lastIndexOf('.', idx - 1) + 1);
+      let end = documentText.indexOf('.', idx + 100);
+      if (end === -1) end = Math.min(documentText.length, idx + 300);
+
+      const clause = documentText.substring(start, end + 1).replace(/\s+/g, ' ').trim();
+      if (clause.length >= 30) {
+        return clause;
+      }
     }
   }
 
@@ -219,25 +616,89 @@ function findMatchingOfficialProduct(insurerText, productNameText, fullText) {
 }
 
 /**
- * Answer user question using the strict Two-Tier Verification Flow:
- * Tier 1: Search Uploaded PDF first.
- * Tier 2: If incomplete/missing, verify using official insurer policy document.
- * 
- * @param {string} userQuestion - Question asked by user
- * @param {Object} policyContext - { fullText, pages, analysisResult, identifiedProduct }
- * @returns {Promise<Object>} Formatted verified response
+ * 6. generateVerifiedExplanation()
+ * Formulates the verified response with exact wording, plain English explanation, and official source link.
+ */
+export async function generateVerifiedExplanation({ clause, question, insurerName, productName, foundInUploadedPolicy, officialSource, conflict = null }) {
+  // If Gemini API is available, generate smooth natural explanation for the exact clause
+  if (GEMINI_API_KEY && clause) {
+    const prompt = `You are the WHYINSURED Official Policy Verification Engine.
+User Question: "${question}"
+Insurer: "${insurerName}"
+Product: "${productName}"
+Found in user's uploaded policy: "${foundInUploadedPolicy || 'Not detailed'}"
+Exact Official Policy Clause: "${clause}"
+
+Task:
+1. Provide a 1-2 sentence simplified English explanation of what this exact clause means for the user.
+2. Keep it clear, friendly, and practical.
+3. Return clean JSON only.
+
+OUTPUT FORMAT:
+{
+  "feature": "Feature Title (e.g. Room Rent Category)",
+  "simpleExplanation": "Clear 1-2 sentence explanation in plain English."
+}`;
+
+    for (const model of GEMINI_MODELS) {
+      try {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 300, responseMimeType: 'application/json' }
+          }),
+          signal: AbortSignal.timeout(6000)
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            return {
+              feature: parsed.feature || 'Verified Policy Detail',
+              officialPolicyWording: clause,
+              simpleExplanation: parsed.simpleExplanation || clause,
+              officialSource: officialSource,
+              conflict: conflict
+            };
+          }
+        }
+      } catch (e) {
+        // Fallback to deterministic
+      }
+    }
+  }
+
+  // Deterministic fallback explanation
+  return {
+    feature: 'Official Policy Condition',
+    officialPolicyWording: clause,
+    simpleExplanation: clause,
+    officialSource: officialSource,
+    conflict: conflict
+  };
+}
+
+/**
+ * Main Controller Function: answerPolicyQuestionWithOfficialVerification()
+ * Orchestrates:
+ * Step 1: Uploaded PDF search.
+ * Step 2: Product Identification.
+ * Step 3: Official Search & Filter.
+ * Step 4: Official Document Read & Clause Extraction.
+ * Step 5: Verified Output.
  */
 export async function answerPolicyQuestionWithOfficialVerification(userQuestion, policyContext) {
-  const { fullText = '', pages = [], analysisResult = {}, identifiedProduct = {} } = policyContext;
+  const { fullText = '', pages = [], analysisResult = {}, identifiedProduct: passedIdentified = {} } = policyContext;
 
-  const insurer = identifiedProduct.insurer || analysisResult.policyDetails?.insurer || 'Uploaded Health Policy';
-  const productName = identifiedProduct.productName || analysisResult.policyDetails?.policyName || 'Health Plan';
-  const uin = identifiedProduct.uin || null;
-
-  // Step 1: First search extracted uploaded PDF chunks
+  // STEP 1: Search uploaded PDF first
   const uploadedPdfResult = searchUploadedPdfForAnswer(userQuestion, fullText, analysisResult);
 
-  // If information in uploaded PDF is complete and definitive -> Return directly
+  // If information in uploaded PDF is complete and definitive -> Return directly from PDF
   if (uploadedPdfResult.isComplete) {
     return {
       success: true,
@@ -251,7 +712,7 @@ export async function answerPolicyQuestionWithOfficialVerification(userQuestion,
       simpleExplanation: uploadedPdfResult.simpleExplanation || uploadedPdfResult.answer,
       officialSource: {
         title: `Uploaded Policy Document (${pages.length || 1} Pages)`,
-        insurer: insurer,
+        insurer: passedIdentified.insurer || analysisResult.policyDetails?.insurer || 'Uploaded Policy',
         page: uploadedPdfResult.sourcePage || 1,
         url: null
       },
@@ -259,58 +720,84 @@ export async function answerPolicyQuestionWithOfficialVerification(userQuestion,
     };
   }
 
-  // Step 2: Information is incomplete or missing in upload -> Trigger Official Verification
-  const matchedOfficialProduct = findMatchingOfficialProduct(insurer, productName, fullText);
+  // STEP 2: Product Identification
+  const productInfo = identifyPolicyFromPDF(fullText, {
+    ...analysisResult,
+    identifiedProduct: passedIdentified
+  });
 
-  // If we have an exact match in our verified official repository, use it immediately
-  if (matchedOfficialProduct) {
-    const verifiedClause = getRelevantClauseFromCatalog(userQuestion, matchedOfficialProduct);
+  const { insurerName, productName, variant, uin } = productInfo;
 
-    if (verifiedClause) {
-      return {
-        success: true,
-        sourceType: 'verified_official',
-        feature: verifiedClause.feature,
-        status: uploadedPdfResult.foundInUploadedPolicy ? 'partially_available' : 'verified_from_official_wording',
-        directAnswer: `Your uploaded policy ${uploadedPdfResult.foundInUploadedPolicy ? 'mentions this partially' : 'does not detail this'}. According to the official policy wording for ${matchedOfficialProduct.productName}: ${verifiedClause.simple}`,
-        foundInUploadedPolicy: uploadedPdfResult.foundInUploadedPolicy || 'Not explicitly detailed in the uploaded document.',
-        additionalVerifiedDetail: `The uploaded document does not detail specific conditions. Verified from official ${matchedOfficialProduct.insurer} policy wording.`,
-        officialPolicyWording: verifiedClause.clause,
-        simpleExplanation: verifiedClause.simple,
-        officialSource: {
-          title: matchedOfficialProduct.officialDocumentTitle,
-          insurer: matchedOfficialProduct.insurer,
-          uin: matchedOfficialProduct.uin,
-          version: matchedOfficialProduct.version,
-          url: matchedOfficialProduct.pdfWordingUrl || matchedOfficialProduct.officialUrl,
-          page: verifiedClause.sourcePage || null
-        },
-        conflict: null
-      };
-    }
-  }
+  // STEP 3: Search official policy documents
+  const searchResults = await searchOfficialPolicyDocuments({
+    insurerName,
+    productName,
+    variant,
+    uin,
+    question: userQuestion
+  });
 
-  // If not in catalog and Gemini API is configured, query dynamic official verification
-  if (GEMINI_API_KEY) {
-    try {
-      const dynamicVerifiedResult = await queryGeminiOfficialVerification(
-        userQuestion,
-        insurer,
-        productName,
-        uin,
-        uploadedPdfResult.foundInUploadedPolicy,
-        fullText.slice(0, 3500)
-      );
+  // STEP 4: Filter to ONLY official insurer/IRDAI sources
+  const officialSources = filterOfficialSources(searchResults, insurerName);
 
-      if (dynamicVerifiedResult && dynamicVerifiedResult.officialPolicyWording) {
-        return dynamicVerifiedResult;
+  let verifiedClause = null;
+  let chosenSource = null;
+
+  if (officialSources.length > 0) {
+    chosenSource = officialSources[0];
+
+    // If candidate has a pre-curated catalog entry with verified clauses
+    if (chosenSource.catalogEntry) {
+      const catalogClause = getRelevantClauseFromCatalog(userQuestion, chosenSource.catalogEntry);
+      if (catalogClause) {
+        verifiedClause = catalogClause.clause;
       }
-    } catch (err) {
-      console.warn('[Official Verification] Dynamic query failed:', err.message);
+    }
+
+    // If clause not found from catalog, fetch live official document
+    if (!verifiedClause) {
+      const docText = await fetchOfficialDocument(chosenSource.url);
+      if (docText) {
+        verifiedClause = extractRelevantClause(docText, userQuestion);
+      }
     }
   }
 
-  // Step 4: No matching official document found -> Safe No-Hallucination response
+  // STEP 5: If verified clause obtained, generate verified response
+  if (verifiedClause && chosenSource) {
+    const explanationResult = await generateVerifiedExplanation({
+      clause: verifiedClause,
+      question: userQuestion,
+      insurerName,
+      productName,
+      foundInUploadedPolicy: uploadedPdfResult.foundInUploadedPolicy,
+      officialSource: {
+        title: chosenSource.title || `Official ${insurerName} ${productName} Policy Wording`,
+        insurer: insurerName,
+        uin: uin || chosenSource.catalogEntry?.uin || null,
+        version: chosenSource.catalogEntry?.version || 'Current Official Version',
+        url: chosenSource.url,
+        domain: chosenSource.domain || 'Official Insurer'
+      },
+      conflict: null
+    });
+
+    return {
+      success: true,
+      sourceType: 'verified_official',
+      feature: explanationResult.feature,
+      status: uploadedPdfResult.foundInUploadedPolicy ? 'partially_available' : 'verified_from_official_wording',
+      directAnswer: `Your uploaded policy ${uploadedPdfResult.foundInUploadedPolicy ? 'mentions this partially' : 'does not detail this'}. According to the official policy wording for ${productName}: ${explanationResult.simpleExplanation}`,
+      foundInUploadedPolicy: uploadedPdfResult.foundInUploadedPolicy || 'Not explicitly detailed in the uploaded document.',
+      additionalVerifiedDetail: `The uploaded document does not detail specific conditions. Verified from official ${insurerName} policy wording.`,
+      officialPolicyWording: explanationResult.officialPolicyWording,
+      simpleExplanation: explanationResult.simpleExplanation,
+      officialSource: explanationResult.officialSource,
+      conflict: explanationResult.conflict
+    };
+  }
+
+  // STEP 6: Zero-Hallucination Fallback
   return {
     success: true,
     sourceType: 'unverified',
@@ -329,16 +816,13 @@ export async function answerPolicyQuestionWithOfficialVerification(userQuestion,
 /**
  * Step 1 Helper: Searches the uploaded PDF text and analysis JSON
  */
-function searchUploadedPdfForAnswer(question, fullText, analysisResult) {
+function searchUploadedPdfForAnswer(question, fullText = '', analysisResult = {}) {
   const lowerQ = (question || '').toLowerCase();
   const lowerDoc = (fullText || '').toLowerCase();
 
   // Check Room Rent
   if (lowerQ.includes('room') || lowerQ.includes('rent') || lowerQ.includes('icu') || lowerQ.includes('sharing')) {
-    const roomHighlight = analysisResult.highlights?.roomCategory;
     const roomLimit = analysisResult.limitsAndConditions?.find(l => (l.conditionName || l.title || '').toLowerCase().includes('room'));
-    const roomCoverage = analysisResult.coverage?.find(c => (c.title || '').toLowerCase().includes('room') || (c.title || '').toLowerCase().includes('hospitalisation'));
-
     if (roomLimit && roomLimit.limitValue && !roomLimit.limitValue.includes('Check') && !roomLimit.limitValue.includes('Schedule')) {
       return {
         isComplete: true,
@@ -350,7 +834,7 @@ function searchUploadedPdfForAnswer(question, fullText, analysisResult) {
       };
     }
 
-    if (lowerDoc.includes('room rent') || lowerDoc.includes('single private')) {
+    if (lowerDoc.includes('room rent') || lowerDoc.includes('single private') || lowerDoc.includes('room category')) {
       return {
         isComplete: false,
         feature: 'Room Rent & Category',
@@ -376,7 +860,7 @@ function searchUploadedPdfForAnswer(question, fullText, analysisResult) {
       }
     }
 
-    if (lowerDoc.includes('waiting period')) {
+    if (lowerDoc.includes('waiting period') || lowerDoc.includes('pre-existing')) {
       return {
         isComplete: false,
         feature: 'Waiting Periods',
@@ -415,7 +899,6 @@ function searchUploadedPdfForAnswer(question, fullText, analysisResult) {
     }
   }
 
-  // Generic Search
   if (lowerDoc.length > 100) {
     return {
       isComplete: false,
@@ -432,85 +915,7 @@ function searchUploadedPdfForAnswer(question, fullText, analysisResult) {
 }
 
 /**
- * Step 2 Helper: Query Gemini with strict official document verification instruction
- */
-async function queryGeminiOfficialVerification(question, insurer, productName, uin, uploadSnippet, pdfText) {
-  const prompt = `You are the WHYINSURED Official Policy Verification Engine.
-User Question: "${question}"
-Uploaded Policy Product: "${insurer}" - "${productName}" (UIN: ${uin || 'Not specified'})
-Information found in user's uploaded file: "${uploadSnippet || 'Not clearly mentioned'}"
-
-TASK:
-1. Verify what the OFFICIAL policy wording of ${insurer} for "${productName}" states regarding the user's question.
-2. Only use exact clauses that apply to ${productName}. Do not confuse it with other variants.
-3. If information cannot be verified from official insurer terms, return null for officialPolicyWording.
-4. Separate the exact official wording from your simple English explanation.
-5. If there is a version difference between uploaded file and current online wording, explain it in "conflict".
-
-REQUIRED JSON OUTPUT FORMAT:
-{
-  "feature": "Feature/Topic name (e.g. Room Rent Limit, Restoration Trigger)",
-  "officialPolicyWording": "Exact relevant clause excerpt from official policy wording",
-  "simpleExplanation": "Easy language explanation in 1-2 sentences",
-  "officialSourceTitle": "Official ${insurer} ${productName} Policy Wording",
-  "officialSourceUrl": "https://official-insurer-website.com/downloads/policy-wording.pdf",
-  "conflict": null or "Difference explanation if version mismatch found"
-}`;
-
-  for (const model of GEMINI_MODELS) {
-    try {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 1200,
-            responseMimeType: 'application/json'
-          }
-        }),
-        signal: AbortSignal.timeout(18000)
-      });
-
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!rawText) continue;
-
-      const parsed = JSON.parse(rawText);
-      if (parsed && parsed.officialPolicyWording) {
-        return {
-          success: true,
-          sourceType: 'verified_official',
-          feature: parsed.feature || 'Verified Policy Condition',
-          status: uploadSnippet ? 'partially_available' : 'verified_from_official_wording',
-          directAnswer: `Your uploaded policy ${uploadSnippet ? 'mentions this partially' : 'does not detail this'}. According to the official policy wording for ${productName}: ${parsed.simpleExplanation}`,
-          foundInUploadedPolicy: uploadSnippet || 'Not detailed in the uploaded document.',
-          additionalVerifiedDetail: `Verified from official ${insurer} policy wording document.`,
-          officialPolicyWording: parsed.officialPolicyWording,
-          simpleExplanation: parsed.simpleExplanation,
-          officialSource: {
-            title: parsed.officialSourceTitle || `Official ${insurer} ${productName} Policy Wording`,
-            insurer: insurer,
-            uin: uin,
-            url: parsed.officialSourceUrl && parsed.officialSourceUrl.startsWith('https://') ? parsed.officialSourceUrl : `https://${insurer.toLowerCase().replace(/[^a-z]/g, '')}.com`
-          },
-          conflict: parsed.conflict || null
-        };
-      }
-    } catch (e) {
-      // Continue to next model
-    }
-  }
-
-  return null;
-}
-
-/**
- * Helper to match question topic to verified clauses in local catalog
+ * Catalog helper for verified clauses
  */
 function getRelevantClauseFromCatalog(question, catalogItem) {
   const lower = (question || '').toLowerCase();
