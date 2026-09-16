@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import optimaSecurePlusRoutes from './routes/optimaSecurePlusRoutes.js';
 import adminAuthRoutes from './routes/adminAuthRoutes.js';
 import aiChatRoutes from './routes/aiChatRoutes.js';
+import policyRoutes from './routes/policyRoutes.js';
 import { seedDatabase } from './database/seed.js';
 
 dotenv.config();
@@ -75,6 +76,9 @@ app.use('/api/optima-secure-plus', optimaSecurePlusRoutes);
 // Mount AI Chat Assistant APIs
 app.use('/api/ai', aiChatRoutes);
 
+// Mount Policy Upload & Analysis APIs
+app.use('/api/policy', policyRoutes);
+
 // 404 Handler
 app.use((req, res) => {
   res.status(404).json({
@@ -92,11 +96,15 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`====================================================`);
-  console.log(`🚀 WHYINSURED API Server running on port ${PORT}`);
-  console.log(`🔗 API Base: http://localhost:${PORT}/api/optima-secure-plus`);
-  console.log(`🔒 Admin Auth Header: x-admin-token: ${process.env.ADMIN_SECRET_KEY || 'whyinsured-admin-secret-2026'}`);
-  console.log(`====================================================`);
-});
+// Start server (only when not in Vercel Serverless environment)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`====================================================`);
+    console.log(`🚀 WHYINSURED API Server running on port ${PORT}`);
+    console.log(`🔗 API Base: http://localhost:${PORT}/api/optima-secure-plus`);
+    console.log(`🔒 Admin Auth Header: x-admin-token: ${process.env.ADMIN_SECRET_KEY || 'whyinsured-admin-secret-2026'}`);
+    console.log(`====================================================`);
+  });
+}
+
+export default app;

@@ -11,8 +11,10 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# Uploaded/generated videos
+# Uploaded/generated videos and temporary policy files
 uploads/videos/
+uploads/temp/
+uploads/generated/
 *.mp4
 
 # OS files
