@@ -202,7 +202,7 @@ export function matchPolicies(requirements = {}, limit = 4, excludeCompanyIds = 
   const preferredInsurer = (requirements.preferredInsurer || '').trim();
   const reqRoom = requirements.roomCategory || requirements.roomPreference || 
     (priorities.includes('single_private_room') ? 'Single Private Room' : (priorities.includes('no_room_rent_capping') ? 'No Room Rent Capping' : null));
-  const normalizedExclusions = (excludeCompanyIds || []).map(c => c.toLowerCase());
+  const normalizedExclusions = (excludeCompanyIds || []).map(c => (c || '').toLowerCase().trim());
   
   const hasSpecificInsurerMatch = Boolean(preferredInsurer && POLICY_CATALOG.some(p => matchesInsurer(p, preferredInsurer)));
 
@@ -220,8 +220,27 @@ export function matchPolicies(requirements = {}, limit = 4, excludeCompanyIds = 
 
   for (const policy of POLICY_CATALOG) {
     // 1. Check exclusions (HARD FILTER)
-    if (normalizedExclusions.some(ex => policy.companyId.includes(ex) || policy.id.includes(ex))) {
-      continue;
+    if (normalizedExclusions.length > 0) {
+      const isExcluded = normalizedExclusions.some(ex => {
+        const cleanEx = ex.replace(/[-_]/g, ' ').trim();
+        const cleanCompId = (policy.companyId || '').toLowerCase().replace(/[-_]/g, ' ').trim();
+        const cleanCompName = (policy.company || '').toLowerCase().trim();
+        const cleanPolicyId = (policy.id || '').toLowerCase().replace(/[-_]/g, ' ').trim();
+
+        return (
+          policy.companyId.toLowerCase() === ex ||
+          policy.id.toLowerCase() === ex ||
+          cleanCompId === cleanEx ||
+          cleanCompId.includes(cleanEx) ||
+          cleanEx.includes(cleanCompId) ||
+          cleanCompName.includes(cleanEx) ||
+          cleanEx.includes(cleanCompName) ||
+          cleanPolicyId.includes(cleanEx)
+        );
+      });
+      if (isExcluded) {
+        continue;
+      }
     }
 
     // 2. Preferred Insurer (HARD FILTER)

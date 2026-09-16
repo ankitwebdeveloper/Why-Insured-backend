@@ -39,6 +39,13 @@ export async function handleAiChat(req, res) {
       recommendations = matchPolicies(aiAnalysis.requirements || {}, 4, aiAnalysis.excludeCompanies || []);
     }
 
+    // Print / log the final analysis for testing
+    console.log('[AI Chat Controller] Final analysis:', JSON.stringify({
+      requirements: aiAnalysis.requirements || {},
+      excludeCompanies: aiAnalysis.excludeCompanies || [],
+      showPlans: Boolean(aiAnalysis.showPlans)
+    }, null, 2));
+
     // 3. Construct structured client-safe response
     return res.status(200).json({
       success: true,
@@ -46,6 +53,7 @@ export async function handleAiChat(req, res) {
       intent: aiAnalysis.intent,
       conversationStage: aiAnalysis.conversationStage || (recommendations.length > 0 ? 'showing_recommendations' : 'collecting_requirements'),
       requirements: aiAnalysis.requirements || {},
+      excludeCompanies: aiAnalysis.excludeCompanies || [],
       recommendations,
       disclaimer: SAFETY_DISCLAIMER
     });

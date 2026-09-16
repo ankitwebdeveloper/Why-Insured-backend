@@ -25,6 +25,59 @@ const GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export const CANONICAL_COMPANIES = [
+  {
+    id: 'star-health',
+    name: 'Star Health',
+    aliases: ['star health', 'star', 'starhealth', 'star health insurance', 'star-health']
+  },
+  {
+    id: 'hdfc-ergo',
+    name: 'HDFC ERGO',
+    aliases: ['hdfc ergo', 'hdfc', 'hdfcergo', 'hdfc ergo health', 'hdfc-ergo']
+  },
+  {
+    id: 'tata-aig',
+    name: 'Tata AIG',
+    aliases: ['tata aig', 'tata', 'tataaig', 'tata health', 'tata-aig']
+  },
+  {
+    id: 'care-health',
+    name: 'Care Health',
+    aliases: ['care health', 'care', 'carehealth', 'religare', 'care-health']
+  },
+  {
+    id: 'niva-bupa',
+    name: 'Niva Bupa',
+    aliases: ['niva bupa', 'niva', 'bupa', 'nivabupa', 'max bupa', 'niva-bupa']
+  },
+  {
+    id: 'icici-lombard',
+    name: 'ICICI Lombard',
+    aliases: ['icici lombard', 'icici', 'lombard', 'icicilombard', 'icici-lombard']
+  },
+  {
+    id: 'aditya-birla',
+    name: 'Aditya Birla',
+    aliases: ['aditya birla', 'aditya', 'birla', 'adityabirla', 'abhealth', 'aditya-birla']
+  }
+];
+
+export function normalizeCompanyId(companyStr) {
+  if (!companyStr || typeof companyStr !== 'string') return null;
+  const clean = companyStr.toLowerCase().trim().replace(/[-_]/g, ' ');
+  for (const comp of CANONICAL_COMPANIES) {
+    if (comp.id === companyStr.toLowerCase().trim()) return comp.id;
+    for (const alias of comp.aliases) {
+      const cleanAlias = alias.replace(/[-_]/g, ' ');
+      if (clean === cleanAlias || clean.includes(cleanAlias) || cleanAlias.includes(clean)) {
+        return comp.id;
+      }
+    }
+  }
+  return companyStr.toLowerCase().trim();
+}
+
 /**
  * Main Entry Point: Analyze user requirement and generate personal advisor response.
  * 
@@ -40,6 +93,7 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
       conversationStage: 'greeting',
       showPlans: false,
       requirements: {},
+      excludeCompanies: [],
       reply: "Hi! 👋 How can I help you with health insurance today?",
       suggestions: []
     };
@@ -47,17 +101,29 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
   }
 
   const cleanMessage = userMessage.trim();
+  const lowerMsg = cleanMessage.toLowerCase().trim();
 
   // 1. Extract previous requirements from conversation history
   const previousReqs = extractRequirementsFromHistory(conversationHistory);
 
   // 2. Extract current requirements from the latest message
-  const currentExtractedReqs = extractRequirementsFromText(cleanMessage, cleanMessage.toLowerCase());
+  const currentExtractedReqs = extractRequirementsFromText(cleanMessage, lowerMsg);
 
   // 3. Merge previous and current requirements
   const mergedReqs = mergeRequirements(previousReqs, currentExtractedReqs, cleanMessage);
 
-  // 4. Format recent conversation history for multi-turn context
+  // 4. Extract accumulated and current company exclusions
+  let excludeCompanies = extractAllExclusionsFromConversation(conversationHistory, cleanMessage, []);
+
+  // Clear preferred insurer if it has been excluded
+  if (mergedReqs.preferredInsurer) {
+    const prefNorm = normalizeCompanyId(mergedReqs.preferredInsurer);
+    if (prefNorm && excludeCompanies.includes(prefNorm)) {
+      mergedReqs.preferredInsurer = null;
+    }
+  }
+
+  // 5. Format recent conversation history for multi-turn context
   const recentHistory = (conversationHistory || [])
     .filter(m => (m.text || m.content))
     .slice(-14)
@@ -70,13 +136,17 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
 
   let finalResult = null;
 
-  // 5. Layer A: Call Gemini if API key is configured
+  // 6. Layer A: Call Gemini if API key is configured
   const hasKey = Boolean(GEMINI_API_KEY && GEMINI_API_KEY.trim() !== 'your_api_key_here' && GEMINI_API_KEY.trim() !== '');
   if (hasKey) {
     try {
-      const geminiResult = await callGeminiApiWithRetry(cleanMessage, recentHistory, mergedReqs, 2);
+      const geminiResult = await callGeminiApiWithRetry(cleanMessage, recentHistory, mergedReqs, excludeCompanies, 2);
       if (geminiResult && geminiResult.reply && typeof geminiResult.reply === 'string') {
         finalResult = geminiResult;
+        if (Array.isArray(geminiResult.excludeCompanies) && geminiResult.excludeCompanies.length > 0) {
+          const geminiNorm = geminiResult.excludeCompanies.map(c => normalizeCompanyId(c)).filter(Boolean);
+          excludeCompanies = Array.from(new Set([...excludeCompanies, ...geminiNorm]));
+        }
       }
     } catch (apiError) {
       console.warn('[Gemini Service] Handled API error (switching to safety fallback):', apiError.message);
@@ -85,32 +155,63 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
     console.warn('[Gemini Service] GEMINI_API_KEY is missing or empty. Using safety fallback advisor.');
   }
 
-  // 6. Safety Net: If Gemini was unavailable, timed out, or failed, use semantic fallback advisor
+  // 7. Safety Net: If Gemini was unavailable, timed out, or failed, use semantic fallback advisor
   if (!finalResult) {
-    finalResult = fallbackSemanticAdvisor(cleanMessage, conversationHistory, mergedReqs);
+    finalResult = fallbackSemanticAdvisor(cleanMessage, conversationHistory, mergedReqs, excludeCompanies);
   }
 
-  // 7. Layer B: Ensure deterministic requirement preservation and explicit trigger handling
+  // 8. Layer B: Ensure deterministic requirement preservation and explicit trigger handling
   finalResult.requirements = mergeRequirements(mergedReqs, finalResult.requirements || {}, cleanMessage);
+  finalResult.excludeCompanies = excludeCompanies;
 
-  // Handle explicit show plans triggers
-  const lowerMsg = cleanMessage.toLowerCase().trim();
+  if (finalResult.requirements && finalResult.requirements.preferredInsurer) {
+    const prefNorm = normalizeCompanyId(finalResult.requirements.preferredInsurer);
+    if (prefNorm && excludeCompanies.includes(prefNorm)) {
+      finalResult.requirements.preferredInsurer = null;
+    }
+  }
+
+  // Handle plan suggestion & recommendation triggers
   const isExplicitShowPlans = (
     lowerMsg === 'show the plan' || lowerMsg === 'show the plans' ||
     lowerMsg === 'show plan' || lowerMsg === 'show plans' ||
     lowerMsg === 'show matching plans' || lowerMsg === 'show me plans' ||
     lowerMsg === 'show me the plan' || lowerMsg === 'show my plan' ||
     lowerMsg === 'show recommendations' || lowerMsg === 'show options' ||
-    lowerMsg.includes('show the plan') || lowerMsg.includes('show matching plan')
+    lowerMsg.includes('show the plan') || lowerMsg.includes('show matching plan') ||
+    lowerMsg.includes('show me plans') || lowerMsg.includes('show plans') ||
+    lowerMsg.includes('suggest another') || lowerMsg.includes('suggest a good plan') ||
+    lowerMsg.includes('suggest plan') || lowerMsg.includes('suggest a plan') ||
+    lowerMsg.includes('suggest me a plan') || lowerMsg.includes('recommend a plan') ||
+    lowerMsg.includes('recommend plan') || lowerMsg.includes('show another') ||
+    lowerMsg.includes('show other') || lowerMsg.includes('another option') ||
+    lowerMsg.includes('another plan') || lowerMsg.includes('any other plan') ||
+    lowerMsg.includes('other plan') || lowerMsg.includes('dusra plan') ||
+    lowerMsg.includes('aur plan') || lowerMsg.includes('different option') ||
+    lowerMsg.includes('different company') || lowerMsg.includes('different insurer') ||
+    lowerMsg.includes('another company') || lowerMsg.includes('something else') ||
+    lowerMsg.includes('not this company') || lowerMsg.includes('not this one') ||
+    (excludeCompanies.length > 0 && (lowerMsg.includes('suggest') || lowerMsg.includes('show') || lowerMsg.includes('option') || lowerMsg.includes('plan') || lowerMsg.includes('another') || lowerMsg.includes('aur') || lowerMsg.includes('else')))
   );
 
-  if (isExplicitShowPlans) {
+  if (isExplicitShowPlans || finalResult.showPlans || (finalResult.intent && finalResult.intent.toUpperCase() === 'SHOW_RECOMMENDATIONS')) {
     finalResult.showPlans = true;
     finalResult.intent = 'SHOW_RECOMMENDATIONS';
     finalResult.conversationStage = 'showing_recommendations';
-    finalResult.reply = finalResult.requirements.preferredInsurer
-      ? `Here are the top ${finalResult.requirements.preferredInsurer} plan options matching your requirements:`
-      : "Here are the top plans that best match your requirements:";
+
+    if (!finalResult.reply || finalResult.reply.includes("Sorry, I encountered") || !hasKey) {
+      if (excludeCompanies.length > 0) {
+        const excludedNames = excludeCompanies.map(id => {
+          const found = CANONICAL_COMPANIES.find(c => c.id === id);
+          return found ? found.name : id;
+        }).join(' and ');
+        finalResult.reply = `Noted — I have excluded ${excludedNames} from your options. Here are the top alternative plans matching your requirements:`;
+      } else if (finalResult.requirements.preferredInsurer) {
+        finalResult.reply = `Here are the top ${finalResult.requirements.preferredInsurer} plan options matching your requirements:`;
+      } else {
+        finalResult.reply = "Here are the top plans that best match your requirements:";
+      }
+    }
   }
 
   // Handle "best company" / general comparison query: do not force previous insurer
@@ -123,6 +224,7 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
   // Debug logging
   console.log('[AI Chat] User message:', cleanMessage);
   console.log('[AI Chat] Detected intent:', finalResult.intent);
+  console.log('[AI Chat] Excluded companies:', finalResult.excludeCompanies);
   console.log('[AI Chat] Final requirements:', finalResult.requirements);
   console.log('[AI Chat] showPlans:', Boolean(finalResult.showPlans));
 
@@ -150,7 +252,7 @@ function isGeneralBestCompanyQuery(lowerText) {
 /**
  * Call Google Gemini REST API with progressive fallback across candidate models
  */
-async function callGeminiApiWithRetry(userMessage, recentHistory, currentRequirements, maxAttempts = 2) {
+async function callGeminiApiWithRetry(userMessage, recentHistory, currentRequirements, excludeCompanies = [], maxAttempts = 2) {
   const systemPrompt = `You are WHYINSURED, an expert AI Health Insurance Advisor.
 You possess deep knowledge of health insurance principles, hospital billing, claims, and retail health policies in India.
 
@@ -166,12 +268,22 @@ CORE DIRECTIVE — DYNAMIC & INTELLIGENT QUESTION ANSWERING:
 - If the question is ambiguous, give the best direct answer and ask ONE short clarification.
 - If user asks a scenario question (e.g. 'agar hospital me 2 lakh ka bill aa gya'), explain how health insurance covers bills, cashless claims, and deductibles in that situation. Do not treat it as a requirement to buy a ₹2L plan.
 - If user asks guidance for parents ('parents ke liye kya dekhna chahiye'), give the key checklist (high sum insured, low PED waiting period, 0% copay, no room rent capping, pre/post hospital cover).
-- STRICTLY FORBIDDEN:
-  * NEVER output generic filler responses like "I'm here to help!", "You can ask me anything about health insurance...", "Tell me who you want coverage for", or "Would you like me to find a plan..." when the user has asked an actual question.
-  * NEVER redirect the user to a predefined list of questions.
+
+COMPANY EXCLUSION & PREFERENCE RULE:
+- If user explicitly rejects, dislikes, distrusts, or wants to exclude a company (e.g. "I don't trust Star Health, suggest another", "Don't show Star", "I don't want Star", "Not Star", "Star nahi chahiye", "Star ke alawa", "I don't want Star or Care"):
+  * Add the company ID (e.g. "star-health", "care-health", "hdfc-ergo", "tata-aig", "niva-bupa", "icici-lombard", "aditya-birla") to "excludeCompanies".
+  * Set "showPlans": true and "intent": "SHOW_RECOMMENDATIONS".
+  * Acknowledge the exclusion naturally in your reply and mention alternative trusted options.
+- If user asks a general question about a company (e.g. "Tell me what Star Health covers", "How is Star Health different?"):
+  * Do NOT exclude the company.
+  * Answer the question directly without excluding.
+
+STRICTLY FORBIDDEN:
+- NEVER output generic filler responses like "I'm here to help!", "You can ask me anything about health insurance...", "Tell me who you want coverage for", or "Would you like me to find a plan..." when the user has asked an actual question.
+- NEVER redirect the user to a predefined list of questions.
 - Maintain independent guidance: Explain trade-offs; do not claim one insurer is universally "the best".
 
-Available Insurers on WHYINSURED: HDFC ERGO, Tata AIG, Care Health, Niva Bupa, Star Health, ICICI Lombard, Aditya Birla.
+Available Insurers on WHYINSURED: HDFC ERGO (hdfc-ergo), Tata AIG (tata-aig), Care Health (care-health), Niva Bupa (niva-bupa), Star Health (star-health), ICICI Lombard (icici-lombard), Aditya Birla (aditya-birla).
 
 Return ONLY a valid JSON object matching this structure:
 {
@@ -179,10 +291,11 @@ Return ONLY a valid JSON object matching this structure:
   "conversationStage": "general_information",
   "showPlans": false,
   "requirements": {},
+  "excludeCompanies": [],
   "reply": "Your direct answer with explanation and practical example."
 }`;
 
-  const userPromptContent = `Known Accumulated Requirements: ${JSON.stringify(currentRequirements || {})}\n\nRecent Conversation History:\n${recentHistory || 'No previous messages'}\n\nLatest User Message: "${userMessage}"`;
+  const userPromptContent = `Known Accumulated Requirements: ${JSON.stringify(currentRequirements || {})}\n\nCurrently Excluded Companies: ${JSON.stringify(excludeCompanies || [])}\n\nRecent Conversation History:\n${recentHistory || 'No previous messages'}\n\nLatest User Message: "${userMessage}"`;
 
   for (const model of GEMINI_MODELS) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -681,6 +794,211 @@ function mergeRequirements(prev = {}, current = {}, userMessage = '') {
 }
 
 /**
+ * Check if a text is asking a general informational question about a company rather than rejecting it
+ */
+function isQuestionAboutCompany(text, alias) {
+  const lower = text.toLowerCase();
+  const questionMarkers = [
+    'tell me what', 'what does', 'what is', 'how is', 'tell me about',
+    'what are the features', 'covers', 'cover karta', 'kya cover', 'details of',
+    'kaisa hai', 'review of', 'information about', 'explain', 'pros and cons',
+    'difference between', 'compare', 'difference'
+  ];
+  const hasQuestionMarker = questionMarkers.some(q => lower.includes(q));
+
+  const rejectionWords = [
+    'dont trust', "don't trust", 'do not trust', 'dont want', "don't want", 'do not want',
+    'dont like', "don't like", 'do not like', 'dont prefer', "don't prefer", 'do not prefer',
+    'dont show', "don't show", 'do not show', 'hata do', 'hatao', 'remove', 'exclude',
+    'nahi chahiye', 'nai chahiye', 'nahi chaiye', 'mat dikhao', 'mat do', 'mat suggest',
+    'other than', 'except', 'apart from', 'besides', 'without', 'ke alawa', 'ke alaawa',
+    'ko chhod', 'chhod kar', 'chhod ke', 'ke bina', 'not ', 'not interested'
+  ];
+  const hasRejection = rejectionWords.some(r => lower.includes(r));
+
+  return hasQuestionMarker && !hasRejection;
+}
+
+/**
+ * Detect explicit company rejections in a single message string
+ */
+function detectExplicitCompanyExclusionsInText(text) {
+  if (!text || typeof text !== 'string') return [];
+  const lower = text.toLowerCase();
+  const exclusions = new Set();
+
+  for (const comp of CANONICAL_COMPANIES) {
+    for (const alias of comp.aliases) {
+      const aliasRegex = new RegExp(`(?:^|[^a-z0-9])${alias.replace(/[-_]/g, '[-\\s_]?')}(?:$|[^a-z0-9])`, 'i');
+      if (!aliasRegex.test(lower)) continue;
+
+      // Skip if it's purely a positive informational question
+      if (isQuestionAboutCompany(lower, alias)) {
+        continue;
+      }
+
+      // Check explicit rejection patterns
+      const isExplicitRejection = (
+        lower.includes(`don't trust ${alias}`) || lower.includes(`dont trust ${alias}`) || lower.includes(`do not trust ${alias}`) ||
+        lower.includes(`don't want ${alias}`) || lower.includes(`dont want ${alias}`) || lower.includes(`do not want ${alias}`) ||
+        lower.includes(`don't like ${alias}`) || lower.includes(`dont like ${alias}`) || lower.includes(`do not like ${alias}`) ||
+        lower.includes(`don't prefer ${alias}`) || lower.includes(`dont prefer ${alias}`) || lower.includes(`do not prefer ${alias}`) ||
+        lower.includes(`don't show ${alias}`) || lower.includes(`dont show ${alias}`) || lower.includes(`do not show ${alias}`) ||
+        lower.includes(`not ${alias}`) || lower.includes(`no ${alias}`) ||
+        lower.includes(`other than ${alias}`) || lower.includes(`except ${alias}`) || lower.includes(`apart from ${alias}`) || lower.includes(`besides ${alias}`) ||
+        lower.includes(`something other than ${alias}`) || lower.includes(`anything other than ${alias}`) ||
+        lower.includes(`without ${alias}`) || lower.includes(`remove ${alias}`) || lower.includes(`exclude ${alias}`) || lower.includes(`skip ${alias}`) ||
+        lower.includes(`avoid ${alias}`) ||
+        lower.includes(`${alias} ko hata`) || lower.includes(`${alias} hata`) ||
+        lower.includes(`${alias} nahi chahiye`) || lower.includes(`${alias} nai chahiye`) || lower.includes(`${alias} nahi chaiye`) || lower.includes(`${alias} mat do`) ||
+        lower.includes(`${alias} ke alawa`) || lower.includes(`${alias} ke alaawa`) || lower.includes(`${alias} ke bina`) ||
+        lower.includes(`${alias} ko chhod`) || lower.includes(`${alias} chhod kar`) || lower.includes(`${alias} chhod ke`) || lower.includes(`${alias} chhodkar`) ||
+        lower.includes(`${alias} mat dikhao`) || lower.includes(`${alias} mat batao`) || lower.includes(`${alias} mat suggest`) ||
+        lower.includes(`${alias} par trust nahi`) || lower.includes(`${alias} pe trust nahi`) || lower.includes(`${alias} pe bharosa nahi`)
+      );
+
+      const hasGeneralRejectionContext = (
+        lower.includes("don't trust") || lower.includes("dont trust") || lower.includes("do not trust") ||
+        lower.includes("don't want") || lower.includes("dont want") || lower.includes("do not want") ||
+        lower.includes("don't like") || lower.includes("dont like") || lower.includes("do not like") ||
+        lower.includes("don't prefer") || lower.includes("dont prefer") || lower.includes("do not prefer") ||
+        lower.includes("don't show") || lower.includes("dont show") || lower.includes("do not show") ||
+        lower.includes("other than") || lower.includes("except") || lower.includes("apart from") ||
+        lower.includes("something other than") || lower.includes("anything other than") ||
+        lower.includes("hata do") || lower.includes("hatao") || lower.includes("nahi chahiye") ||
+        lower.includes("nai chahiye") || lower.includes("ke alawa") || lower.includes("chhod ke") ||
+        lower.includes("chhod kar") || lower.includes("mat dikhao") || lower.includes("without")
+      );
+
+      if (isExplicitRejection || hasGeneralRejectionContext) {
+        exclusions.add(comp.id);
+      }
+    }
+  }
+
+  return Array.from(exclusions);
+}
+
+/**
+ * Detect indirect rejection of previously recommended/mentioned company
+ * e.g., "something else", "not this one", "another company", "show me a different insurer", "dusri company"
+ */
+function detectIndirectRejection(currentMessage, conversationHistory = []) {
+  if (!currentMessage || !Array.isArray(conversationHistory) || conversationHistory.length === 0) {
+    return [];
+  }
+
+  // If user already specified an explicit company rejection, do not infer indirect
+  const explicit = detectExplicitCompanyExclusionsInText(currentMessage);
+  if (explicit.length > 0) {
+    return [];
+  }
+
+  const lower = currentMessage.toLowerCase().trim();
+  const indirectRejectionPhrases = [
+    'not this company',
+    'not this one',
+    'not this insurer',
+    'not this plan',
+    'not this',
+    'not these',
+    'different company',
+    'different insurer',
+    'show me a different insurer',
+    'another company',
+    'another insurer',
+    'koi aur company',
+    'dusri company',
+    'koi doosri company'
+  ];
+
+  const isIndirect = indirectRejectionPhrases.some(phrase => lower.includes(phrase));
+  if (!isIndirect) return [];
+
+  // Find the most recent assistant message
+  const lastAiMsg = [...conversationHistory].reverse().find(m => (m.sender === 'ai' || m.role === 'assistant' || m.sender === 'assistant'));
+  if (!lastAiMsg) return [];
+
+  const excluded = new Set();
+
+  // If previous assistant message had recommendation cards, reject the top recommended company
+  if (Array.isArray(lastAiMsg.recommendations) && lastAiMsg.recommendations.length > 0) {
+    const topRec = lastAiMsg.recommendations[0];
+    if (topRec && topRec.companyId) {
+      const norm = normalizeCompanyId(topRec.companyId);
+      if (norm) excluded.add(norm);
+    } else if (topRec && (topRec.company || topRec.companyName)) {
+      const norm = normalizeCompanyId(topRec.company || topRec.companyName);
+      if (norm) excluded.add(norm);
+    }
+  }
+
+  // If previous assistant text explicitly focused on a specific company
+  const aiText = (lastAiMsg.text || lastAiMsg.content || '').toLowerCase();
+  for (const comp of CANONICAL_COMPANIES) {
+    for (const alias of comp.aliases) {
+      if (aiText.includes(alias)) {
+        excluded.add(comp.id);
+        break;
+      }
+    }
+  }
+
+  return Array.from(excluded);
+}
+
+/**
+ * Extract all persistent exclusions across full multi-turn conversation
+ */
+function extractAllExclusionsFromConversation(conversationHistory = [], currentMessage = '', geminiExclusions = []) {
+  const lowerCurrent = (currentMessage || '').toLowerCase();
+
+  // Reset if requested
+  if (
+    lowerCurrent.includes('forget everything') || lowerCurrent.includes('start again') ||
+    lowerCurrent.includes('start over') || lowerCurrent.includes('reset search')
+  ) {
+    return [];
+  }
+
+  const allExclusions = new Set();
+
+  // 1. Scan historical user turns
+  if (Array.isArray(conversationHistory)) {
+    for (let i = 0; i < conversationHistory.length; i++) {
+      const msg = conversationHistory[i];
+      const isUser = (msg.sender === 'user' || msg.role === 'user');
+      if (isUser) {
+        const text = msg.text || msg.content || '';
+        const explicit = detectExplicitCompanyExclusionsInText(text);
+        explicit.forEach(id => allExclusions.add(id));
+
+        const historySlice = conversationHistory.slice(0, i);
+        const indirect = detectIndirectRejection(text, historySlice);
+        indirect.forEach(id => allExclusions.add(id));
+      }
+    }
+  }
+
+  // 2. Scan current user message
+  const currentExplicit = detectExplicitCompanyExclusionsInText(currentMessage);
+  currentExplicit.forEach(id => allExclusions.add(id));
+
+  const currentIndirect = detectIndirectRejection(currentMessage, conversationHistory);
+  currentIndirect.forEach(id => allExclusions.add(id));
+
+  // 3. Merge with Gemini API exclusions
+  if (Array.isArray(geminiExclusions)) {
+    for (const item of geminiExclusions) {
+      const norm = normalizeCompanyId(item);
+      if (norm) allExclusions.add(norm);
+    }
+  }
+
+  return Array.from(allExclusions);
+}
+
+/**
  * Helper to extract requirements dynamically from conversation text
  */
 function extractRequirementsFromText(allText, lowerCurrent) {
@@ -786,6 +1104,8 @@ function extractRequirementsFromText(allText, lowerCurrent) {
   }
 
   let preferredInsurer = null;
+  const currentExclusions = detectExplicitCompanyExclusionsInText(allText);
+
   if (lowerAll.includes('aditya birla') || lowerAll.includes('aditya') || lowerAll.includes('birla')) {
     preferredInsurer = 'Aditya Birla';
   } else if (lowerAll.includes('hdfc')) {
@@ -803,28 +1123,37 @@ function extractRequirementsFromText(allText, lowerCurrent) {
   }
 
   const isExclusion = (
+    currentExclusions.length > 0 ||
     lowerCurrent.includes('remove') || lowerCurrent.includes('exclude') ||
     lowerCurrent.includes('hata do') || lowerCurrent.includes('mat dikhao') ||
-    lowerCurrent.includes('nahi chahiye')
+    lowerCurrent.includes('nahi chahiye') || lowerCurrent.includes('dont trust') ||
+    lowerCurrent.includes("don't trust") || lowerCurrent.includes("don't want") ||
+    lowerCurrent.includes('dont want') || lowerCurrent.includes('not ') ||
+    lowerCurrent.includes('other than') || lowerCurrent.includes('ke alawa')
   );
 
   if (isExclusion || isGeneralBestCompanyQuery(lowerCurrent)) {
-    preferredInsurer = null;
+    if (preferredInsurer) {
+      const prefNorm = normalizeCompanyId(preferredInsurer);
+      if (currentExclusions.includes(prefNorm) || isExclusion) {
+        preferredInsurer = null;
+      }
+    }
   } else {
     // Current message insurer preference override
-    if (lowerCurrent.includes('star')) {
+    if (lowerCurrent.includes('star') && !currentExclusions.includes('star-health')) {
       preferredInsurer = 'Star Health';
-    } else if (lowerCurrent.includes('aditya') || lowerCurrent.includes('birla')) {
+    } else if ((lowerCurrent.includes('aditya') || lowerCurrent.includes('birla')) && !currentExclusions.includes('aditya-birla')) {
       preferredInsurer = 'Aditya Birla';
-    } else if (lowerCurrent.includes('hdfc')) {
+    } else if (lowerCurrent.includes('hdfc') && !currentExclusions.includes('hdfc-ergo')) {
       preferredInsurer = 'HDFC ERGO';
-    } else if (lowerCurrent.includes('niva') || lowerCurrent.includes('bupa')) {
+    } else if ((lowerCurrent.includes('niva') || lowerCurrent.includes('bupa')) && !currentExclusions.includes('niva-bupa')) {
       preferredInsurer = 'Niva Bupa';
-    } else if (lowerCurrent.includes('care')) {
+    } else if (lowerCurrent.includes('care') && !currentExclusions.includes('care-health')) {
       preferredInsurer = 'Care Health';
-    } else if (lowerCurrent.includes('tata')) {
+    } else if (lowerCurrent.includes('tata') && !currentExclusions.includes('tata-aig')) {
       preferredInsurer = 'Tata AIG';
-    } else if (lowerCurrent.includes('icici') || lowerCurrent.includes('lombard')) {
+    } else if ((lowerCurrent.includes('icici') || lowerCurrent.includes('lombard')) && !currentExclusions.includes('icici-lombard')) {
       preferredInsurer = 'ICICI Lombard';
     }
   }
