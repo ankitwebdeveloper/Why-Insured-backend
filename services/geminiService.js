@@ -1,197 +1,32 @@
 /**
  * geminiService.js
  * 
- * Production-grade Gemini AI Personal Insurance Advisor for WHYINSURED.
- * Open-ended conversational intelligence:
- *   - Classifies user intent per message (GREETING, EDUCATIONAL_QUESTION, BENEFIT_EXPLANATION, 
- *     GENERAL_HEALTH_INSURANCE_QUESTION, REQUIREMENT_UPDATE, FOLLOW_UP_ANSWER, 
- *     RECOMMENDATION_REQUEST, SHOW_RECOMMENDATIONS, PLAN_QUERY, COMPARISON_QUERY, 
- *     REMOVE_RECOMMENDATION, NEW_OPTION_REQUEST, REQUIREMENT_RESET, UNSUPPORTED_DOMAIN, 
- *     GENERAL_NON_INSURANCE)
- *   - Answers educational questions directly and thoroughly without demanding requirements.
- *   - Collects missing requirements progressively and accumulates state across turns.
- *   - Recommends policies ONLY upon explicit user request.
- *   - Grounded strictly in verified WHYINSURED policy catalog.
+ * WHYINSURED AI Personal Health Insurance Advisor Backend Service.
+ * 
+ * Two-Layer Architecture:
+ * - Layer A (Gemini Conversational Engine):
+ *   Gemini generates natural, contextual conversational responses for explanations,
+ *   educational queries, benefit definitions, examples, follow-ups, comparisons,
+ *   and progressive requirement discussions.
+ * - Layer B (Deterministic Requirement & Matcher Engine):
+ *   Robust parsing and state accumulation for structured fields (relationship,
+ *   ages, coverage, room category, preferred insurer) and policy recommendation matching.
+ * 
+ * Safety Net:
+ * - Built-in fallbackSemanticAdvisor handles API timeouts, missing keys, or network errors
+ *   intelligently without returning generic dead-end messages.
  */
 
 import dotenv from 'dotenv';
 dotenv.config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = 'gemini-3.6-flash';
+const GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.6-flash'];
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Deterministic intent guard for critical educational, benefit, general, and greeting queries.
- * Returns the intent string if clearly identifiable, otherwise null.
- * 
- * @param {string} userMessage
- * @returns {string|null}
- */
-export function getDeterministicIntentOverride(userMessage) {
-  if (!userMessage || typeof userMessage !== 'string') return null;
-  const raw = userMessage.trim();
-  if (!raw) return null;
-
-  let lower = raw.toLowerCase()
-    .replace(/[?!.,;:_]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // 1. Requirement & recommendation queries
-  const isRequirementQuery = (
-    lower === 'i need a health plan' ||
-    lower === 'i need health insurance' ||
-    lower === 'i need insurance' ||
-    lower === 'i want a health plan' ||
-    lower === 'i want health insurance' ||
-    lower.includes('need health insurance') ||
-    lower.includes('need a health plan') ||
-    lower.includes('want a health plan') ||
-    lower.includes('want health insurance') ||
-    lower.includes('looking for health insurance') ||
-    lower.includes('looking for a health plan') ||
-    lower.includes('looking for a plan') ||
-    lower.includes('show me a suitable plan') ||
-    lower.includes('recommend a health plan') ||
-    lower.includes('help me find a health plan') ||
-    lower.includes('help me find a plan') ||
-    lower.includes('need insurance') ||
-    lower.includes('want insurance') ||
-    lower.includes('insurance chahiye') ||
-    lower.includes('plan chahiye') ||
-    lower.includes('for myself') ||
-    lower.includes('for my parents') ||
-    lower === 'myself' ||
-    lower === 'my self' ||
-    lower === 'me' ||
-    lower === 'parents' ||
-    lower === 'my parents'
-  );
-
-  // 2. Pure Greeting Check (e.g. "hlo", "hi", "hello", "hey")
-  const isGreetingWord = /^(hi|hii|hiii|hello|helo|hlo|hlw|hey|hy|namaste|namaskar|good\s*morning|good\s*afternoon|good\s*evening|wassup|hola)\b/i.test(lower);
-  if (isGreetingWord) {
-    const wordCount = lower.split(/\s+/).length;
-    if (wordCount <= 3 && !isRequirementQuery && !lower.includes('need') && !lower.includes('want') && !lower.includes('plan') && !lower.includes('insurance')) {
-      return 'GREETING';
-    }
-    if (isRequirementQuery || lower.includes('need') || lower.includes('want') || lower.includes('plan') || lower.includes('insurance')) {
-      return 'REQUIREMENT_UPDATE';
-    }
-  }
-
-  // 3. General Best Company Query ("Give me best health insurance company")
-  const isGeneralBestCompanyQuery = (
-    lower.includes('best health insurance company') ||
-    lower.includes('best insurance company') ||
-    lower.includes('best health insurance provider') ||
-    lower.includes('best insurer') ||
-    lower.includes('top health insurance company') ||
-    lower.includes('top insurance company') ||
-    lower.includes('which insurance company is best') ||
-    lower.includes('which company is best') ||
-    lower.includes('best company for health insurance') ||
-    (lower.includes('best health insurance') && lower.includes('company'))
-  );
-
-  if (isGeneralBestCompanyQuery) {
-    return 'COMPARISON_QUERY';
-  }
-
-  // 4. Show Plans / Recommendations request
-  const isShowPlanRequest = (
-    lower === 'show the plan' ||
-    lower === 'show the plans' ||
-    lower === 'show plan' ||
-    lower === 'show plans' ||
-    lower === 'show matching plans' ||
-    lower === 'show me plans' ||
-    lower === 'show me the plan' ||
-    lower.includes('show me tata aig plan') ||
-    lower.includes('show tata aig plan')
-  );
-
-  if (isShowPlanRequest) {
-    return 'SHOW_RECOMMENDATIONS';
-  }
-
-  if (isRequirementQuery) {
-    return 'REQUIREMENT_UPDATE';
-  }
-
-  // 5. Educational Questions (Why Health Insurance is Important / Need)
-  if (
-    lower.includes('why health insurance') ||
-    lower.includes('why is health insurance') ||
-    lower.includes('why do i need') ||
-    lower.includes('why should i buy') ||
-    lower.includes('why insurance is important') ||
-    lower.includes('importance of health insurance') ||
-    lower.includes('importance of insurance') ||
-    lower.includes('health insurance importance') ||
-    lower.includes('need of health insurance') ||
-    lower.includes('why medical insurance') ||
-    lower.includes('do i really need') ||
-    lower.includes('kyun zaroori') ||
-    lower.includes('kyu zaroori') ||
-    lower.includes('kyun chahiye') ||
-    lower.includes('kyu chahiye') ||
-    lower.includes('benefits of health insurance') ||
-    lower.includes('health insurance benefits') ||
-    lower.includes('benefit of having health insurance') ||
-    lower.includes('ke fayde')
-  ) {
-    return 'EDUCATIONAL_QUESTION';
-  }
-
-  // 6. General Health Insurance Questions (What is Health Insurance / How it works)
-  if (
-    lower.startsWith('what is health insurance') ||
-    lower.startsWith('what is medical insurance') ||
-    lower.startsWith('explain health insurance') ||
-    lower.startsWith('how does health insurance work') ||
-    lower.includes('health insurance kya hai') ||
-    lower.includes('health insurance kya hota') ||
-    lower.startsWith('tell me about health insurance')
-  ) {
-    return 'GENERAL_HEALTH_INSURANCE_QUESTION';
-  }
-
-  // 7. Benefit Explanation Questions (Restoration, Waiting Period, Room Rent, etc.)
-  const benefitTerms = [
-    'restoration', 'recharge', 'waiting period', 'waiting periods', 'room rent', 'room category',
-    'sum insured', 'copay', 'co-payment', 'co payment', 'deductible', 'cashless', 'reimbursement',
-    'network hospital', 'network hospitals', 'ncb', 'no claim bonus', 'cumulative bonus',
-    'consumables', 'pre-hospitalization', 'pre hospitalization', 'post-hospitalization',
-    'post hospitalization', 'daycare', 'day-care', 'day care', 'ped'
-  ];
-
-  const isExploratoryOrTerm = (
-    benefitTerms.includes(lower) ||
-    lower.startsWith('what is ') || lower.startsWith('what are ') ||
-    lower.startsWith('explain ') || lower.startsWith('meaning of ') ||
-    lower.startsWith('how does ') || lower.startsWith('tell me about ') ||
-    lower.includes(' kya hai') || lower.includes(' kya hota') ||
-    lower.includes(' benefit') || lower.includes(' clause')
-  );
-
-  if (isExploratoryOrTerm) {
-    for (const term of benefitTerms) {
-      if (lower === term || lower.includes(term)) {
-        if (!lower.startsWith('i want') && !lower.startsWith('i need') && !lower.startsWith('only ')) {
-          return 'BENEFIT_EXPLANATION';
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-/**
- * Analyze user requirement and generate personal advisor conversational response.
+ * Main Entry Point: Analyze user requirement and generate personal advisor response.
  * 
  * @param {string} userMessage - Latest user message
  * @param {Array} conversationHistory - Past conversation messages
@@ -208,195 +43,197 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
       reply: "Hi! 👋 I'm your WHYINSURED Advisor. Think of me as your insurance friend — you can ask me anything about health insurance, or tell me what kind of plan you're looking for.",
       suggestions: []
     };
-
-    console.log('[AI Chat] User message:', userMessage);
-    console.log('[AI Chat] Deterministic intent override:', null);
-    console.log('[AI Chat] Detected intent:', defaultGreeting.intent);
-    console.log('[AI Chat] Previous requirements:', {});
-    console.log('[AI Chat] Extracted requirements:', {});
-    console.log('[AI Chat] Merged requirements:', {});
-    console.log('[AI Chat] showPlans:', false);
-
     return defaultGreeting;
   }
+
+  const cleanMessage = userMessage.trim();
 
   // 1. Extract previous requirements from conversation history
   const previousReqs = extractRequirementsFromHistory(conversationHistory);
 
-  // 2. Format conversation history for multi-turn context
+  // 2. Extract current requirements from the latest message
+  const currentExtractedReqs = extractRequirementsFromText(cleanMessage, cleanMessage.toLowerCase());
+
+  // 3. Merge previous and current requirements
+  const mergedReqs = mergeRequirements(previousReqs, currentExtractedReqs, cleanMessage);
+
+  // 4. Format recent conversation history for multi-turn context
   const recentHistory = (conversationHistory || [])
-    .filter(m => (m.text || m.content) && !(m.text || m.content).includes('Think of me as your insurance friend'))
+    .filter(m => (m.text || m.content))
     .slice(-14)
-    .map(m => `${(m.sender === 'user' || m.role === 'user') ? 'User' : 'Advisor'}: ${m.text || m.content}`)
+    .map(m => {
+      const isUser = (m.sender === 'user' || m.role === 'user');
+      const text = (m.text || m.content || '').trim();
+      return `${isUser ? 'User' : 'WHYINSURED Assistant'}: ${text}`;
+    })
     .join('\n');
 
   let finalResult = null;
 
-  // 3. Detect deterministic critical intent override
-  const deterministicIntent = getDeterministicIntentOverride(userMessage);
-
-  if (deterministicIntent) {
-    // For clear deterministic intents, use fallbackSemanticAdvisor directly and do NOT trust Gemini classification
-    finalResult = fallbackSemanticAdvisor(userMessage, conversationHistory, previousReqs);
-  } else if (GEMINI_API_KEY && GEMINI_API_KEY.trim() !== 'your_api_key_here' && GEMINI_API_KEY.trim() !== '') {
-    // 4. Try Gemini API if key is available
+  // 5. Layer A: Call Gemini if API key is configured
+  if (GEMINI_API_KEY && GEMINI_API_KEY.trim() !== 'your_api_key_here' && GEMINI_API_KEY.trim() !== '') {
     try {
-      const geminiResult = await callGeminiApiWithRetry(userMessage, recentHistory, availablePoliciesSummary, 2);
-      if (geminiResult && geminiResult.intent && geminiResult.reply) {
+      const geminiResult = await callGeminiApiWithRetry(cleanMessage, recentHistory, mergedReqs, 2);
+      if (geminiResult && geminiResult.reply && typeof geminiResult.reply === 'string') {
         finalResult = geminiResult;
       }
     } catch (apiError) {
-      console.warn('[Gemini Service] Handled API error (using built-in semantic advisor):', apiError.message);
+      console.warn('[Gemini Service] Handled API error (switching to safety fallback):', apiError.message);
     }
   }
 
-  // 5. Fallback to resilient semantic personal advisor engine if Gemini failed or returned empty
+  // 6. Safety Net: If Gemini was unavailable, timed out, or failed, use semantic fallback advisor
   if (!finalResult) {
-    finalResult = fallbackSemanticAdvisor(userMessage, conversationHistory, previousReqs);
+    finalResult = fallbackSemanticAdvisor(cleanMessage, conversationHistory, mergedReqs);
   }
 
-  // 6. Ensure multi-turn requirement state accumulation
-  const currentExtractedReqs = extractRequirementsFromText(userMessage, userMessage.toLowerCase());
-  const mergedReqs = mergeRequirements(previousReqs, finalResult.requirements || currentExtractedReqs, userMessage);
-  finalResult.requirements = mergedReqs;
+  // 7. Layer B: Ensure deterministic requirement preservation and explicit trigger handling
+  finalResult.requirements = mergeRequirements(mergedReqs, finalResult.requirements || {}, cleanMessage);
 
-  // 7. Server-side debug logging
-  console.log('[AI Chat] User message:', userMessage);
-  console.log('[AI Chat] Deterministic intent override:', deterministicIntent);
+  // Handle explicit show plans triggers
+  const lowerMsg = cleanMessage.toLowerCase().trim();
+  const isExplicitShowPlans = (
+    lowerMsg === 'show the plan' || lowerMsg === 'show the plans' ||
+    lowerMsg === 'show plan' || lowerMsg === 'show plans' ||
+    lowerMsg === 'show matching plans' || lowerMsg === 'show me plans' ||
+    lowerMsg === 'show me the plan' || lowerMsg === 'show my plan' ||
+    lowerMsg === 'show recommendations' || lowerMsg === 'show options' ||
+    lowerMsg.includes('show the plan') || lowerMsg.includes('show matching plan')
+  );
+
+  if (isExplicitShowPlans) {
+    finalResult.showPlans = true;
+    finalResult.intent = 'SHOW_RECOMMENDATIONS';
+    finalResult.conversationStage = 'showing_recommendations';
+    finalResult.reply = finalResult.requirements.preferredInsurer
+      ? `Here are the top ${finalResult.requirements.preferredInsurer} plan options matching your requirements:`
+      : "Here are the top plans that best match your requirements:";
+  }
+
+  // Handle "best company" / general comparison query: do not force previous insurer
+  const isGeneralBestCompany = isGeneralBestCompanyQuery(lowerMsg);
+  if (isGeneralBestCompany) {
+    finalResult.requirements.preferredInsurer = null;
+    finalResult.showPlans = false;
+  }
+
+  // Debug logging
+  console.log('[AI Chat] User message:', cleanMessage);
   console.log('[AI Chat] Detected intent:', finalResult.intent);
-  console.log('[AI Chat] Previous requirements:', previousReqs);
-  console.log('[AI Chat] Extracted requirements:', currentExtractedReqs);
-  console.log('[AI Chat] Merged requirements:', mergedReqs);
+  console.log('[AI Chat] Final requirements:', finalResult.requirements);
   console.log('[AI Chat] showPlans:', Boolean(finalResult.showPlans));
 
   return finalResult;
 }
 
 /**
- * Call Gemini REST API with flexible open-ended persona and intent reasoning
+ * Check if a query is a general "best company" comparison request
  */
-async function callGeminiApiWithRetry(userMessage, recentHistory, availablePoliciesSummary, maxAttempts = 2) {
-  const systemPrompt = `You are the WHYINSURED Personal Health Insurance Advisor — a warm, friendly, real conversational insurance expert.
-You speak in a simple, friendly, conversational tone (English or natural Hinglish matching the user).
+function isGeneralBestCompanyQuery(lowerText) {
+  return (
+    lowerText.includes('best health insurance company') ||
+    lowerText.includes('best insurance company') ||
+    lowerText.includes('best health insurance provider') ||
+    lowerText.includes('best insurer') ||
+    lowerText.includes('top health insurance company') ||
+    lowerText.includes('top insurance company') ||
+    lowerText.includes('which insurance company is best') ||
+    lowerText.includes('which company is best') ||
+    lowerText.includes('best company for health insurance') ||
+    (lowerText.includes('best health insurance') && lowerText.includes('company'))
+  );
+}
 
-INTENT CLASSIFICATION (Classify accurately):
-- GREETING: User says hello/hi/hlo/hey.
-- EDUCATIONAL_QUESTION: User asks why health insurance is important, why they need it, or its importance.
-- BENEFIT_EXPLANATION: User asks about specific terms (restoration, room rent, waiting period, copay, deductible, NCB, cashless, consumables).
-- GENERAL_HEALTH_INSURANCE_QUESTION: User asks what health insurance is or how it works.
-- REQUIREMENT_UPDATE: User shares or initiates requirements (e.g. "I need health insurance", "for myself", "for my parents").
-- FOLLOW_UP_ANSWER: User provides a short contextual answer (e.g. "20 lakh", "private room", "father 45 mother 36", "only Tata AIG") to a previous question.
-- RECOMMENDATION_REQUEST / SHOW_RECOMMENDATIONS: User asks to see, recommend, or compare plans (e.g. "Which health insurance should I take?", "show me plans", "show me tata aig plan").
-- COMPARISON_QUERY: User asks to compare specific insurers/plans.
-- PLAN_QUERY: User asks informational questions about a specific policy/insurer.
-- REMOVE_RECOMMENDATION: User asks to exclude a specific insurer.
-- REQUIREMENT_RESET: User asks to restart/reset requirements.
-- UNSUPPORTED_DOMAIN: User asks about motor/life/travel/bike insurance.
+/**
+ * Call Google Gemini REST API with progressive fallback across candidate models
+ */
+async function callGeminiApiWithRetry(userMessage, recentHistory, currentRequirements, maxAttempts = 2) {
+  const systemPrompt = `You are WHYINSURED, an expert AI Health Insurance Advisor.
+You possess deep knowledge of health insurance principles, hospital billing, claims, and retail health policies in India.
 
-CRITICAL CONVERSATIONAL PRINCIPLES:
-1. NO REPETITIVE "GOT IT" ACKNOWLEDGEMENTS:
-   - NEVER start every message with "Got it" or repeat robotic acknowledgements.
-   - Use natural phrasing: "Sure!", "Understood.", "Noted.", or answer the question directly.
+CORE DIRECTIVE — DYNAMIC & INTELLIGENT QUESTION ANSWERING:
+- You must understand ANY question asked by the user in their own words, including:
+  * Spelling mistakes or typos (e.g. "n you tellmabout health insurance" -> "Can you tell me about health insurance?")
+  * Hinglish / Hindi queries (e.g. "room rent kya hota h", "agar hospital me 2 lakh ka bill aa gya", "parents ke liye kya dekhna chahiye", "claim kaise karte hain")
+  * Incomplete or short queries (e.g. "restoration?", "deductible meaning", "10L vs 20L")
+  * Scenario-based questions (e.g. "if bill is 2 lakh how much will insurance pay")
+- Answer the user's actual question FIRST and DIRECTLY in simple, clear Indian English.
+- Give a simple explanation first, and provide a practical real-world example when helpful.
+- If the question is ambiguous, give the best direct answer and ask ONE short clarification.
+- If user asks a scenario question (e.g. 'agar hospital me 2 lakh ka bill aa gya'), explain how health insurance covers bills, cashless claims, and deductibles in that situation. Do not treat it as a requirement to buy a ₹2L plan.
+- If user asks guidance for parents ('parents ke liye kya dekhna chahiye'), give the key checklist (high sum insured, low PED waiting period, 0% copay, no room rent capping, pre/post hospital cover).
+- STRICTLY FORBIDDEN:
+  * NEVER output generic filler responses like "I'm here to help!", "You can ask me anything about health insurance...", "Tell me who you want coverage for", or "Would you like me to find a plan..." when the user has asked an actual question.
+  * NEVER redirect the user to a predefined list of questions.
+- Maintain independent guidance: Explain trade-offs; do not claim one insurer is universally "the best".
 
-2. ANSWER EDUCATIONAL & CONCEPT QUESTIONS DIRECTLY FIRST:
-   - If user asks ANY educational or conceptual question (e.g., "why health insurance is important", "what is restoration?", "what is waiting period?", "what is room rent?", "what is sum insured?", "what is copay?"):
-     * Directly explain the concept thoroughly in simple conversational language.
-     * For "why health insurance is important": Explain protection of savings from large hospital bills, cashless treatment access, comprehensive coverage, predictability, and tax benefits.
-     * Do NOT start a questionnaire or force requirement collection when the user is asking an educational question.
+Available Insurers on WHYINSURED: HDFC ERGO, Tata AIG, Care Health, Niva Bupa, Star Health, ICICI Lombard, Aditya Birla.
 
-3. PROGRESSIVE REQUIREMENT COLLECTION:
-   - When the user shares requirements (e.g. "I need health insurance"), ask who the plan is for (self, parents, family).
-   - Once relationship is known ("for myself"), ask for coverage preference (e.g. ₹10 Lakh, ₹20 Lakh, ₹50 Lakh).
-   - Once coverage is known ("20 lakh"), ask for room preference (Single Private Room) or company preference.
-   - Once requirements are ready, ask if they would like to see matching plans.
-   - NEVER repeat questions for information already provided.
-
-4. MULTI-TURN REQUIREMENT PRESERVATION:
-   - Always preserve and accumulate previously extracted requirements from Conversation History (relationship, ages, coverage, roomCategory, preferredInsurer, priorities).
-   - New messages must update/merge into previously extracted requirements rather than replacing them.
-   - Example: if user previously provided relationship: "self" and coverage: 20, and then says "only Tata AIG", output requirements must retain relationship: "self", coverage: 20, and set preferredInsurer: "Tata AIG".
-
-5. RECOMMENDATIONS ONLY UPON EXPLICIT REQUEST:
-   - Only set showPlans: true and intent: "SHOW_RECOMMENDATIONS" (or "RECOMMENDATION_REQUEST") when the user explicitly asks to see plans or specific company plans.
-   - When user asks for plans from a specific company (e.g. "show me tata aig plan", "shoe me tata aig plan", "only Tata AIG"):
-     * intent: "SHOW_RECOMMENDATIONS"
-     * showPlans: true
-     * requirements.preferredInsurer: Exact valid company name ("Tata AIG", "HDFC ERGO", "Star Health", "Niva Bupa", "Care Health", "ICICI Lombard", "Aditya Birla").
-
-6. GROUNDING (WHYINSURED DATA):
-   - Available Insurers: HDFC ERGO, Aditya Birla, Care Health, Niva Bupa, Star Health, ICICI Lombard, Tata AIG.
-
-OUTPUT FORMAT: Return ONLY valid JSON:
+Return ONLY a valid JSON object matching this structure:
 {
-  "intent": string,
-  "conversationStage": "greeting" | "general_information" | "collecting_requirements" | "awaiting_plan_confirmation" | "showing_recommendations" | "recommendation_follow_up",
-  "showPlans": boolean,
-  "excludeCompanies": string[],
-  "requirements": {
-    "relationship": string or null,
-    "ages": { "father"?: number, "mother"?: number, "self"?: number, "raw"?: number[] } or number[] or null,
-    "coverage": number or null,
-    "preferredInsurer": string or null,
-    "roomCategory": string or null,
-    "priorities": string[],
-    "addonsPreference": string or null,
-    "preExistingDiseases": string[]
-  },
-  "reply": string,
-  "suggestions": string[]
+  "intent": "GENERAL_HEALTH_INSURANCE_QUESTION",
+  "conversationStage": "general_information",
+  "showPlans": false,
+  "requirements": {},
+  "reply": "Your direct answer with explanation and practical example."
 }`;
 
-  const promptContent = `Conversation History:\n${recentHistory || 'No previous messages'}\n\nLatest User Message: "${userMessage}"`;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const userPromptContent = `Known Accumulated Requirements: ${JSON.stringify(currentRequirements || {})}\n\nRecent Conversation History:\n${recentHistory || 'No previous messages'}\n\nLatest User Message: "${userMessage}"`;
 
-  const payload = {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: `${systemPrompt}\n\n${promptContent}` }]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 800,
-      responseMimeType: 'application/json'
-    }
-  };
+  for (const model of GEMINI_MODELS) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const payload = {
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: `${systemPrompt}\n\n${userPromptContent}` }]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 1500,
+            responseMimeType: 'application/json'
+          }
+        };
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(6000)
-      });
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(7000)
+        });
 
-      if (response.status === 503 || response.status === 429) {
+        if (response.status === 404 || response.status === 429) {
+          // Try next candidate model
+          break;
+        }
+
+        if (response.status === 503) {
+          if (attempt < maxAttempts) {
+            await wait(800);
+            continue;
+          }
+          break;
+        }
+
+        if (!response.ok) {
+          break;
+        }
+
+        const data = await response.json();
+        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const parsedJson = safelyParseGeminiJson(rawText);
+        if (parsedJson && parsedJson.reply) {
+          return parsedJson;
+        }
+      } catch (err) {
         if (attempt < maxAttempts) {
-          await wait(1000);
+          await wait(800);
           continue;
-        } else {
-          return null;
         }
       }
-
-      if (!response.ok) {
-        return null;
-      }
-
-      const data = await response.json();
-      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      const parsedJson = safelyParseGeminiJson(rawText);
-      if (parsedJson) {
-        return parsedJson;
-      }
-    } catch (netErr) {
-      if (attempt < maxAttempts) {
-        await wait(800);
-        continue;
-      }
-      return null;
     }
   }
 
@@ -416,7 +253,7 @@ function safelyParseGeminiJson(rawText) {
 
   try {
     const parsed = JSON.parse(cleaned);
-    if (parsed && typeof parsed === 'object' && parsed.intent) {
+    if (parsed && typeof parsed === 'object' && parsed.reply) {
       return parsed;
     }
   } catch (err) {
@@ -424,7 +261,7 @@ function safelyParseGeminiJson(rawText) {
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsedMatch = JSON.parse(jsonMatch[0]);
-        if (parsedMatch && typeof parsedMatch === 'object' && parsedMatch.intent) {
+        if (parsedMatch && typeof parsedMatch === 'object' && parsedMatch.reply) {
           return parsedMatch;
         }
       }
@@ -437,133 +274,90 @@ function safelyParseGeminiJson(rawText) {
 }
 
 /**
- * Intelligent Semantic Fallback Engine with Open-Ended Intent Understanding
+ * Semantic Fallback Engine (Safety Net)
+ * Generates natural, helpful, context-aware responses when Gemini API is offline or unreachable.
  */
-function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previousReqs = {}) {
+function fallbackSemanticAdvisor(userMessage, conversationHistory = [], accumulatedReqs = {}) {
   const rawCurrent = (userMessage || '').trim();
   let lowerCurrent = rawCurrent.toLowerCase();
 
-  // Normalize common broken/typo queries
+  // Normalize common terms
   lowerCurrent = lowerCurrent
     .replace(/\b(aents|parnts|perents|parants)\b/g, 'parents')
     .replace(/\b(helath|healt|hlaeth)\b/g, 'health')
     .replace(/\b(inusrance|insurence|insurnace|insuranc|insurane)\b/g, 'insurance')
-    .replace(/\b(moto\s*insurance|moter\s*insurance)\b/g, 'motor insurance')
-    .replace(/\b(two\s*wheeler|2\s*wheeler|four\s*wheeler|4\s*wheeler|auto\s*insurance)\b/g, 'motor insurance')
-    .replace(/\b(shoe|shw|sho|shoow)\b/g, 'show')
-    .replace(/\bplanhai\b/g, 'plan hai');
+    .replace(/\b(shoe|shw|sho|shoow)\b/g, 'show');
 
-  // Multi-turn requirement accumulation
-  const currentExtracted = extractRequirementsFromText(rawCurrent, lowerCurrent);
-  const accumulatedReqs = mergeRequirements(previousReqs, currentExtracted, rawCurrent);
+  // Multi-turn context inspection
+  const historyTexts = (conversationHistory || [])
+    .map(m => (m.text || m.content || '').toLowerCase())
+    .join(' ');
 
-  // Inspect last assistant prompt from history to interpret contextual follow-up answers
   const lastAdvisorMsg = [...(conversationHistory || [])]
     .reverse()
     .find(m => m.sender === 'ai' || m.sender === 'assistant' || m.role === 'assistant' || m.role === 'ai')?.text || '';
   const lastAdvisorLower = lastAdvisorMsg.toLowerCase();
 
-  // =========================================================================
-  // 0. DOMAIN INTENT DETECTION (Motor, Vehicle, Travel, Life, Home, General)
-  // =========================================================================
-  const isMotorDomain = (
-    lowerCurrent.includes('motor') || lowerCurrent.includes('car insurance') ||
-    lowerCurrent.includes('bike insurance') || lowerCurrent.includes('vehicle insurance') ||
-    lowerCurrent.includes('auto insurance') || lowerCurrent.includes('car policy')
+  // 1. Follow-up "example" / "explain" requests (e.g. "Give me short explanation with example")
+  const isExampleOrExplanationRequest = (
+    lowerCurrent.includes('example') ||
+    lowerCurrent.includes('explain') ||
+    lowerCurrent.includes('short explanation') ||
+    lowerCurrent.includes('tell me more') ||
+    lowerCurrent.includes('meaning') ||
+    lowerCurrent.includes('samjhao') ||
+    lowerCurrent.includes('batao')
   );
 
-  const isLifeDomain = (
-    lowerCurrent.includes('life insurance') || lowerCurrent.includes('term life') ||
-    lowerCurrent.includes('term insurance') || lowerCurrent.includes('life policy')
-  );
+  if (isExampleOrExplanationRequest) {
+    // Check if the current message or recent history was discussing restoration
+    if (lowerCurrent.includes('restoration') || historyTexts.includes('restoration') || lastAdvisorLower.includes('restoration')) {
+      return {
+        intent: 'BENEFIT_EXPLANATION',
+        conversationStage: 'general_information',
+        showPlans: false,
+        requirements: accumulatedReqs,
+        reply: "Here is a simple explanation with an example of **Restoration Benefit**:\n\n**Concept**: If your insurance coverage runs out during a hospitalization, the insurer automatically restores 100% of your sum insured for subsequent treatments in the same policy year.\n\n**Example**: Suppose you have a ₹10 Lakh policy. In March, you undergo surgery costing ₹10 Lakh, utilizing your entire cover. If in July you or a covered family member need hospitalization for ₹6 Lakh, the restoration benefit refills your sum insured, covering the ₹6 Lakh bill without requiring you to pay out of pocket.",
+        suggestions: []
+      };
+    }
 
-  const isTravelDomain = (
-    lowerCurrent.includes('travel insurance') || lowerCurrent.includes('travel cover') ||
-    lowerCurrent.includes('flight insurance')
-  );
+    // Check if the current message or recent history was discussing room rent
+    if (lowerCurrent.includes('room rent') || historyTexts.includes('room rent') || lastAdvisorLower.includes('room rent') || lastAdvisorLower.includes('room category')) {
+      return {
+        intent: 'BENEFIT_EXPLANATION',
+        conversationStage: 'general_information',
+        showPlans: false,
+        requirements: accumulatedReqs,
+        reply: "Here is a clear explanation and example of **Room Rent Capping**:\n\n**Concept**: Room rent capping limits how much an insurer will pay per day for your hospital room (e.g., 1% of Sum Insured). Exceeding this limit triggers proportionate deductions on doctor fees and surgery costs across your entire bill.\n\n**Example**: If you have a ₹5 Lakh policy with a 1% room rent cap (₹5,000/day) and choose a Deluxe room costing ₹10,000/day, you exceeded the limit by 2X. Consequently, the insurer may only pay 50% of your total hospital and doctor charges, leaving you to pay the rest.\n\nChoosing a plan with **Single Private Room eligibility or No Room Rent Capping** avoids all proportionate deductions.",
+        suggestions: []
+      };
+    }
 
-  const isHomeDomain = (
-    lowerCurrent.includes('home insurance') || lowerCurrent.includes('property insurance') ||
-    lowerCurrent.includes('house insurance')
-  );
+    // Check if the current message or recent history was discussing waiting periods
+    if (lowerCurrent.includes('waiting period') || historyTexts.includes('waiting period') || lastAdvisorLower.includes('waiting period')) {
+      return {
+        intent: 'BENEFIT_EXPLANATION',
+        conversationStage: 'general_information',
+        showPlans: false,
+        requirements: accumulatedReqs,
+        reply: "Here is an explanation and example of **Waiting Periods**:\n\n**Concept**: A waiting period is a specific timeframe after buying a policy during which certain medical treatments or pre-existing diseases are not yet covered.\n\n**Example**: If you declare Diabetes when buying a policy with a 24-month Pre-Existing Disease (PED) waiting period, any hospitalization related to Diabetes in the first 2 years won't be covered. After 24 months, it is covered 100% up to your sum insured. (Emergency accidents are covered from Day 1).",
+        suggestions: []
+      };
+    }
 
-  const isUnsupportedInsurance = isMotorDomain || isLifeDomain || isTravelDomain || isHomeDomain;
-
-  if (isUnsupportedInsurance && !lowerCurrent.includes('health')) {
+    // General explanation with example
     return {
-      intent: 'UNSUPPORTED_DOMAIN',
-      domain: isMotorDomain ? 'MOTOR_INSURANCE' : (isLifeDomain ? 'LIFE_INSURANCE' : (isTravelDomain ? 'TRAVEL_INSURANCE' : 'HOME_INSURANCE')),
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      intent: 'GENERAL_HEALTH_INSURANCE_QUESTION',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "I can explain the basics of car/motor and other insurance, but WHYINSURED currently specializes in health insurance. Whenever you're ready, I can help you understand health insurance, compare health plans, or find the best plan for your needs.",
+      reply: "Health insurance is a plan that helps cover eligible medical and hospital expenses. You pay a premium to get this protection.\n\n**Example**: If you have a ₹10 lakh health insurance policy and a covered hospital treatment costs ₹3 lakh, the insurer may pay the eligible amount according to the policy terms, instead of you paying the entire bill yourself.\n\nIn simple words, health insurance protects you from large unexpected medical expenses.",
       suggestions: []
     };
   }
 
-  // General Non-Insurance queries (weather, cricket, coding, etc.)
-  const isNonInsurance = (
-    lowerCurrent.includes('weather') || lowerCurrent.includes('temperature') ||
-    lowerCurrent.includes('cricket score') || lowerCurrent.includes('recipe') ||
-    (lowerCurrent.includes('who are you') && !lowerCurrent.includes('advisor'))
-  );
-
-  if (isNonInsurance) {
-    return {
-      intent: 'GENERAL_NON_INSURANCE',
-      domain: 'GENERAL_NON_INSURANCE',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "I'm your WHYINSURED Health Insurance Advisor, so I specialize in health insurance policies, benefits, comparisons, and claims. Feel free to ask me anything about health insurance!",
-      suggestions: []
-    };
-  }
-
-  // Returning to health insurance from out of scope
-  if (lowerCurrent.includes('actually') && lowerCurrent.includes('health')) {
-    return {
-      intent: 'REQUIREMENT_UPDATE',
-      conversationStage: 'collecting_requirements',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "Great! Let's find the right health insurance plan for you. What coverage are you looking for — around ₹10 lakh, ₹20 lakh, ₹50 lakh, or something else?",
-      suggestions: []
-    };
-  }
-
-  // =========================================================================
-  // 1. INTENT: REQUIREMENT_RESET (User starts over or clears context)
-  // =========================================================================
-  const isReset = (
-    lowerCurrent.includes('forget everything') || lowerCurrent.includes('forget previous') ||
-    lowerCurrent.includes('start again') || lowerCurrent.includes('start over') ||
-    lowerCurrent.includes('reset search') || lowerCurrent.includes('reset') ||
-    (lowerCurrent.includes('actually') && (lowerCurrent.includes('for myself') || lowerCurrent.includes('for me')))
-  );
-
-  if (isReset) {
-    const newRelationship = (lowerCurrent.includes('myself') || lowerCurrent.includes('for me') || lowerCurrent.includes('single')) ? 'self' : null;
-    return {
-      intent: 'REQUIREMENT_RESET',
-      conversationStage: 'collecting_requirements',
-      showPlans: false,
-      requirements: {
-        relationship: newRelationship,
-        ages: null,
-        coverage: null,
-        preferredInsurer: null,
-        roomCategory: null,
-        priorities: []
-      },
-      reply: "No problem! Let's start fresh. What kind of coverage are you looking for — for example ₹10 Lakh, ₹20 Lakh, or ₹50 Lakh?",
-      suggestions: []
-    };
-  }
-
-  // =========================================================================
-  // 2. INTENT: GREETING (Initial or pure greeting including "hlo", "hi", "hey")
-  // =========================================================================
+  // 2. Greeting
   const isGreeting = (
     /^(hi|hii|hiii|hello|helo|hlo|hlw|hey|hy|namaste|namaskar|good\s*morning|good\s*afternoon|good\s*evening|wassup|hola)\b/i.test(lowerCurrent) &&
     lowerCurrent.split(/\s+/).length <= 3
@@ -574,408 +368,100 @@ function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previous
       intent: 'GREETING',
       conversationStage: 'greeting',
       showPlans: false,
-      requirements: {},
+      requirements: accumulatedReqs,
       reply: "Hi! 👋 Nice to meet you. I'm your WHYINSURED Advisor. Think of me as your insurance friend — you can ask me anything about health insurance, or tell me what kind of plan you're looking for.",
       suggestions: []
     };
   }
 
-  // =========================================================================
-  // 3. INTENT: EDUCATIONAL_QUESTION (Why Health Insurance is Important / Need)
-  // =========================================================================
-  const isWhyInsuranceImportant = (
+  // 3. Why Health Insurance is Important
+  if (
     lowerCurrent.includes('why health insurance') || lowerCurrent.includes('why is health insurance') ||
     lowerCurrent.includes('why do i need') || lowerCurrent.includes('why should i buy') ||
-    lowerCurrent.includes('why is medical insurance') || lowerCurrent.includes('do i really need') ||
     lowerCurrent.includes('why insurance is important') || lowerCurrent.includes('importance of health insurance') ||
     lowerCurrent.includes('importance of insurance') || lowerCurrent.includes('health insurance importance') ||
-    lowerCurrent.includes('need of health insurance') || lowerCurrent.includes('why medical insurance') ||
-    lowerCurrent.includes('kyun zaroori') || lowerCurrent.includes('kyu zaroori') ||
-    lowerCurrent.includes('kyun chahiye') || lowerCurrent.includes('kyu chahiye') ||
-    lowerCurrent.includes('ke fayde') || lowerCurrent.includes('benefit of having health insurance') ||
-    lowerCurrent.includes('benefits of health insurance')
-  );
-
-  if (isWhyInsuranceImportant) {
+    lowerCurrent.includes('need of health insurance') || lowerCurrent.includes('do i really need') ||
+    lowerCurrent.includes('benefits of health insurance') || lowerCurrent.includes('ke fayde')
+  ) {
     return {
       intent: 'EDUCATIONAL_QUESTION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "Health insurance is essential for several key reasons:\n\n• **Protects Your Hard-Earned Savings**: Medical treatments and surgeries can easily cost lakhs. Insurance ensures a sudden illness doesn't drain your family savings.\n• **Access to Cashless Treatment**: In an emergency, network hospitals admit and treat you cashlessly without needing immediate cash arrangements.\n• **Covers Comprehensive Medical Costs**: Beyond room rent, it covers pre-hospitalization tests, doctor fees, ICU charges, surgeries, medicines, and post-discharge recovery.\n• **Financial Peace of Mind & Quality Care**: Gives you the freedom to choose top hospitals and experienced doctors without worrying about hospital bills.\n• **Tax Deductions (Section 80D)**: Premiums qualify for annual tax deductions up to ₹25,000 (and up to ₹50,000 for senior citizen parents).\n\nWhenever you're ready, I can explain specific concepts like restoration and room rent, or help you find the right health plan for your needs!",
+      reply: "Health insurance is essential for several key reasons:\n\n• **Protects Your Savings**: Major surgeries and critical illnesses can cost ₹5–15 Lakh+. Insurance prevents sudden medical emergencies from wiping out your family's savings.\n• **Cashless Hospitalization**: Network hospitals treat you without requiring immediate out-of-pocket cash arrangements.\n• **Comprehensive Coverage**: Covers hospital room, ICU, doctor fees, surgeries, pre-hospitalization tests (60 days), and post-discharge recovery (90–180 days).\n• **Tax Benefits (Section 80D)**: Save up to ₹25,000/year on taxes for self/family, and up to ₹50,000 for senior citizen parents.\n\nWhenever you're ready, I can explain specific features like restoration and room rent, or help you find the right health plan!",
       suggestions: []
     };
   }
 
-  // =========================================================================
-  // 4. INTENT: BENEFIT_EXPLANATION (Restoration, Waiting Period, Room Rent, etc.)
-  // =========================================================================
-
-  // A. Restoration / Recharge / Refill Question
+  // 4. Restoration / Recharge definition
   if (
-    lowerCurrent.includes('what is restoration') || lowerCurrent.includes('restoration kya') ||
-    lowerCurrent.includes('explain restoration') || lowerCurrent.includes('how does restoration') ||
-    lowerCurrent.includes('what does restoration mean') || lowerCurrent.includes('unlimited restoration mean') ||
-    lowerCurrent.includes('what is recharge') || lowerCurrent.includes('recharge benefit') ||
-    lowerCurrent.includes('restoration benefit') || lowerCurrent === 'restoration'
+    lowerCurrent.includes('restoration') || lowerCurrent.includes('recharge') ||
+    lowerCurrent.includes('what is restoration') || lowerCurrent.includes('explain restoration')
   ) {
     return {
       intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "**Restoration benefit** automatically refills 100% of your sum insured if it gets exhausted by medical claims in a policy year, so you and your family are never left unprotected for subsequent hospitalizations.\n\nMany modern policies (such as HDFC Optima Secure+, Aditya Birla Activ One, and Niva Bupa ReAssure 2.0) offer **Unlimited Restoration** for both same and unrelated illnesses.",
+      reply: "**Restoration Benefit** automatically refills 100% of your sum insured if it gets exhausted by medical claims in a policy year.\n\n**Example**: If you have a ₹10 Lakh sum insured and use the full ₹10 Lakh for a treatment in June, restoration refills another ₹10 Lakh so you remain covered for subsequent hospitalizations in the same policy year.\n\nLeading policies (such as HDFC Optima Secure+, Aditya Birla Activ One, and Care Supreme) offer **Unlimited Restoration** for both same and unrelated illnesses.",
       suggestions: []
     };
   }
 
-  // B. Waiting Period / PED Question
+  // 5. Room Rent definition
   if (
-    lowerCurrent.includes('what is waiting period') || lowerCurrent.includes('waiting period kya') ||
-    lowerCurrent.includes('explain waiting period') || lowerCurrent.includes('what is ped') ||
-    lowerCurrent.includes('ped kya hai') || lowerCurrent === 'waiting period' ||
-    lowerCurrent === 'waiting periods' || lowerCurrent === 'what is waiting periods'
+    lowerCurrent.includes('room rent') || lowerCurrent.includes('room category') ||
+    lowerCurrent.includes('what is room rent') || lowerCurrent.includes('explain room rent') ||
+    lowerCurrent.includes('tell me about room rent')
   ) {
     return {
       intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "A **waiting period** is the duration during which specific illnesses or pre-existing conditions are not covered after your policy begins:\n• **Initial Waiting Period**: First 30 days (except accidental hospitalization which is covered from Day 1).\n• **Specific Diseases**: 12 to 24 months for specified procedures (e.g., cataract, hernia, joint replacement, stones).\n• **Pre-Existing Diseases (PED)**: Standard 24 to 36 months before declared pre-existing conditions (like Diabetes or BP) are covered.",
+      reply: "**Room Rent Capping** limits the daily allowance an insurer pays for your hospital room (e.g. 1% of Sum Insured per day).\n\nIf you choose a room above your eligible limit, insurers apply proportionate deductions to your entire hospital bill (including doctor and ICU charges).\n\n**Recommendation**: Choosing a plan with **Single Private Room eligibility or No Room Rent Capping** ensures you can choose any comfortable room without out-of-pocket penalties.",
       suggestions: []
     };
   }
 
-  // C. Room Rent & Room Category Question
+  // 6. What is Health Insurance / How it works
   if (
-    lowerCurrent.includes('what is room rent') || lowerCurrent.includes('room rent kya') ||
-    lowerCurrent.includes('what is room category') || lowerCurrent.includes('what is single private') ||
-    lowerCurrent.includes('explain room rent') || lowerCurrent.includes('why is room category') ||
-    lowerCurrent.includes('proportionate deduction') || lowerCurrent.includes('what is icu') ||
-    lowerCurrent === 'room rent' || lowerCurrent === 'what is room rent?'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**Room rent capping** limits how much the insurer pays for your hospital room per day (e.g. 1% of sum insured). If you choose a room above your allowed category, proportionate deductions are applied to your entire hospital bill.\n\nChoosing a policy with **Single Private Room eligibility or No Room Rent Capping** (such as HDFC Optima Secure+, Aditya Birla Activ One, or Care Supreme) ensures complete freedom of room selection without out-of-pocket penalties.",
-      suggestions: []
-    };
-  }
-
-  // D. Sum Insured & Coverage Sizing Question
-  if (
-    lowerCurrent.includes('what is sum insured') || lowerCurrent.includes('sum insured kya') ||
-    lowerCurrent.includes('how much coverage') || lowerCurrent.includes('how much health insurance') ||
-    lowerCurrent.includes('is 10 lakh enough') || lowerCurrent.includes('is 20 lakh enough') ||
-    lowerCurrent.includes('difference between 10 lakh and 20 lakh') || lowerCurrent === 'sum insured'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**Sum Insured** is the maximum annual coverage pool your insurer will pay towards covered hospitalization bills in a policy year.\n\n**Recommended Sizing Guidelines:**\n• **For Parents/Seniors**: ₹20 Lakh to ₹50 Lakh is recommended due to higher treatment costs.\n• **For Metro Cities (Tier-1)**: ₹20 Lakh+ is ideal to safeguard against 10–14% annual medical inflation.\n• **For Tier-2/3 Cities**: ₹10 Lakh to ₹15 Lakh provides a solid baseline.",
-      suggestions: []
-    };
-  }
-
-  // E. Deductible & Co-payment Question
-  if (
-    lowerCurrent.includes('what is copay') || lowerCurrent.includes('what is co-payment') ||
-    lowerCurrent.includes('copay kya') || lowerCurrent.includes('what is deductible') ||
-    lowerCurrent.includes('deductible kya') || lowerCurrent === 'copay' || lowerCurrent === 'deductible'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "• **Co-payment (Copay)**: A fixed percentage (e.g., 10% or 20%) of the hospital bill you pay out of pocket, while the insurer covers the rest.\n• **Deductible**: A pre-agreed fixed threshold (e.g., ₹50,000) you pay first before your insurance coverage starts paying.\n\nMost premium retail health plans on WHYINSURED offer **0% mandatory copay** for standard age groups.",
-      suggestions: []
-    };
-  }
-
-  // F. Cashless Treatment, Reimbursement & Network Hospitals Question
-  if (
-    lowerCurrent.includes('what is cashless') || lowerCurrent.includes('cashless treatment kya') ||
-    lowerCurrent.includes('what is reimbursement') || lowerCurrent.includes('what is network hospital') ||
-    lowerCurrent === 'cashless' || lowerCurrent === 'reimbursement'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "• **Cashless Treatment**: The insurer directly settles approved hospital bills with the network hospital, so you don't need to arrange large amounts of cash during admission.\n• **Reimbursement**: If treated at a non-network hospital, you pay the bills initially and submit claim documents to the insurer for reimbursement.\n• **Network Hospital**: A hospital that has an official cashless tie-up with your insurance provider.",
-      suggestions: []
-    };
-  }
-
-  // G. Pre and Post Hospitalization Question
-  if (
-    lowerCurrent.includes('what is pre-hospitalization') || lowerCurrent.includes('pre and post') ||
-    lowerCurrent.includes('pre hospitalization kya') || lowerCurrent.includes('post hospitalization kya') ||
-    lowerCurrent.includes('pre-hospitalization') || lowerCurrent.includes('post-hospitalization')
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "• **Pre-Hospitalization**: Covers medical consultations, diagnostic tests, and investigations incurred **60 days** before hospital admission.\n• **Post-Hospitalization**: Covers recovery expenses, follow-up doctor visits, and medications for **90 to 180 days** after hospital discharge.",
-      suggestions: []
-    };
-  }
-
-  // H. Day-Care Treatment Question
-  if (
-    lowerCurrent.includes('what is day-care') || lowerCurrent.includes('day care kya') ||
-    lowerCurrent.includes('what is daycare') || lowerCurrent === 'daycare' || lowerCurrent === 'day care'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**Day-care treatments** are medical procedures or surgeries that require hospital admission but are completed in less than 24 hours due to modern medical advancements (such as cataract surgery, chemotherapy, radiotherapy, dialysis, or tonsillectomy). Modern comprehensive health plans cover all daycare treatments up to the full sum insured.",
-      suggestions: []
-    };
-  }
-
-  // I. No-Claim Bonus (NCB) / Cumulative Bonus Question
-  if (
-    lowerCurrent.includes('what is ncb') || lowerCurrent.includes('what is no claim bonus') ||
-    lowerCurrent.includes('ncb kya') || lowerCurrent.includes('what is cumulative bonus') ||
-    lowerCurrent === 'ncb' || lowerCurrent === 'no claim bonus'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**No-Claim Bonus (NCB)** or **Cumulative Bonus** is a reward provided by the insurer for every claim-free year. It automatically increases your base Sum Insured (typically 10% to 50% per claim-free year, up to 500% in plans like Care Supreme) without increasing your premium.",
-      suggestions: []
-    };
-  }
-
-  // J. Consumables / Non-medical Items Question
-  if (
-    lowerCurrent.includes('what is consumable') || lowerCurrent.includes('what are consumables') ||
-    lowerCurrent.includes('non-medical expenses kya') || lowerCurrent === 'consumables'
-  ) {
-    return {
-      intent: 'BENEFIT_EXPLANATION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**Hospital Consumables** are non-medical disposable supplies used during treatment (such as PPE kits, surgical gloves, syringes, cotton, and oxygen masks). In standard policies, these cost 10–15% of the bill and are paid out-of-pocket, but plans with Consumables Cover (like HDFC Optima Secure+ with Protect Benefit) pay for them 100%.",
-      suggestions: []
-    };
-  }
-
-  // =========================================================================
-  // 5. INTENT: GENERAL_HEALTH_INSURANCE_QUESTION (Overview & Fundamentals)
-  // =========================================================================
-  if (
-    lowerCurrent.includes('tell about health insurance') || lowerCurrent.includes('what is health insurance') ||
-    lowerCurrent.includes('about health insurance') || lowerCurrent.includes('how does health insurance work') ||
-    lowerCurrent.includes('explain health insurance') || lowerCurrent.includes('health insurance kya hai') ||
-    lowerCurrent.includes('health insurance kya hota') || lowerCurrent === 'health insurance'
+    lowerCurrent.includes('what is health insurance') || lowerCurrent.includes('explain health insurance') ||
+    lowerCurrent.includes('how does health insurance work') || lowerCurrent.includes('health insurance kya hai')
   ) {
     return {
       intent: 'GENERAL_HEALTH_INSURANCE_QUESTION',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "Health insurance is a policy that helps cover eligible medical and hospitalization expenses according to the policy terms. You pay an annual premium, and the insurer covers hospital bills up to the sum insured limit.\n\nIn simple terms, it helps protect you and your family from sudden medical costs and provides access to cashless hospital care.\n\nIf you'd like, I can also explain how waiting periods, room rent, restoration benefits work, or help you understand how to choose the right coverage!",
+      reply: "Health insurance is a plan that helps cover eligible medical and hospital expenses. You pay a premium to get this protection.\n\n**Example**: If you have a ₹10 lakh health insurance policy and a covered hospital treatment costs ₹3 lakh, the insurer may pay the eligible amount according to the policy terms, instead of you paying the entire bill yourself.\n\nIn simple words, health insurance protects you from large unexpected medical expenses.",
       suggestions: []
     };
   }
 
-  // =========================================================================
-  // 6. INTENT: COMPARISONS, COMPANY QUERIES & EXCLUSIONS
-  // =========================================================================
-
-  // General Best Company Query ("Give me best health insurance company")
-  const isGeneralBestCompanyQuery = (
-    lowerCurrent.includes('best health insurance company') ||
-    lowerCurrent.includes('best insurance company') ||
-    lowerCurrent.includes('best health insurance provider') ||
-    lowerCurrent.includes('best insurer') ||
-    lowerCurrent.includes('top health insurance company') ||
-    lowerCurrent.includes('top insurance company') ||
-    lowerCurrent.includes('which insurance company is best') ||
-    lowerCurrent.includes('which company is best') ||
-    lowerCurrent.includes('best company for health insurance') ||
-    (lowerCurrent.includes('best health insurance') && lowerCurrent.includes('company'))
-  );
-
-  if (isGeneralBestCompanyQuery) {
+  // 7. General Best Company comparison
+  if (isGeneralBestCompanyQuery(lowerCurrent)) {
     accumulatedReqs.preferredInsurer = null;
     return {
       intent: 'COMPARISON_QUERY',
-      conversationStage: accumulatedReqs.relationship ? 'collecting_requirements' : 'general_information',
+      conversationStage: 'general_information',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: "In health insurance, no single company is objectively 'the best' for everyone, as the right choice depends on your specific priorities. Here are top matching insurers worth comparing:\n\n• **HDFC ERGO**: Known for high claim settlement reliability, 2X instant coverage (Secure Benefit), and zero room-rent capping.\n• **Tata AIG**: Strong network of cashless hospitals, high restoration limits, and comprehensive coverage.\n• **Aditya Birla**: Excellent for wellness rewards (up to 100% HealthReturns™) and Day 1 chronic condition management.\n• **Care Health**: High cumulative bonus multipliers and flexible sum insured options.\n\nWould you like me to show matching plans across these top insurers, or focus on a specific company?",
-      suggestions: []
-    };
-  }
-  
-  // A. Compare HDFC and Aditya Birla
-  if (
-    (lowerCurrent.includes('compare') || lowerCurrent.includes('vs') || lowerCurrent.includes('difference')) &&
-    lowerCurrent.includes('hdfc') && (lowerCurrent.includes('aditya') || lowerCurrent.includes('birla'))
-  ) {
-    return {
-      intent: 'COMPARISON_QUERY',
-      conversationStage: 'collecting_requirements',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "Here is how **HDFC ERGO Optima Secure+** compares with **Aditya Birla Activ One**:\n• **Instant Cover vs Wellness**: HDFC gives **2X Instant Coverage on Day 1** (doubles base sum insured); Aditya Birla offers **Up to 100% HealthReturns™ cashback** on an active healthy lifestyle.\n• **Chronic Illnesses**: Aditya Birla covers chronic conditions (Diabetes, BP, Asthma, Cholesterol) from **Day 1** under Chronic Care Management; HDFC Optima Secure+ has a standard 24-month PED waiting period.\n• **Restoration**: Both offer unlimited / super reload restoration benefits and zero room-rent capping.",
+      reply: "In health insurance, no single insurer is objectively 'the best' for everyone, because the right choice depends on your specific priorities:\n\n• **HDFC ERGO**: Known for high claim settlement reliability, 2X instant coverage (Secure Benefit), and zero room-rent capping.\n• **Tata AIG**: Strong cashless network, 100% cumulative bonus without claim reduction, and comprehensive coverage.\n• **Aditya Birla**: Outstanding for wellness rewards (up to 100% HealthReturns™) and Day 1 chronic condition management.\n• **Care Health**: High cumulative bonus multipliers (up to 500%) and flexible sum insured options.\n• **Niva Bupa**: Feature-rich plans with entry-age locking (ReAssure 2.0).\n\nSuitability depends on your preferred coverage, family member ages, and hospital room preferences. Would you like me to help find a plan for yourself or your family?",
       suggestions: []
     };
   }
 
-  // E. Removal of Company ("remove Star", "Star wala hata do")
-  if (
-    lowerCurrent.includes('hata do') || lowerCurrent.includes('remove') || 
-    lowerCurrent.includes('mat dikhao') || lowerCurrent.includes('nahi chahiye') ||
-    lowerCurrent.includes('exclude')
-  ) {
-    let excludeCompany = 'star-health';
-    if (lowerCurrent.includes('hdfc')) excludeCompany = 'hdfc-ergo';
-    else if (lowerCurrent.includes('niva')) excludeCompany = 'niva-bupa';
-    else if (lowerCurrent.includes('care')) excludeCompany = 'care-health';
-    else if (lowerCurrent.includes('birla') || lowerCurrent.includes('aditya')) excludeCompany = 'aditya-birla';
-
-    const companyName = excludeCompany === 'star-health' ? 'Star Health' : (excludeCompany === 'hdfc-ergo' ? 'HDFC ERGO' : 'the selected insurer');
-
-    return {
-      intent: 'REMOVE_RECOMMENDATION',
-      conversationStage: 'showing_recommendations',
-      showPlans: true,
-      excludeCompanies: [excludeCompany],
-      requirements: accumulatedReqs,
-      reply: `Understood! I've removed ${companyName} from your options. Here are the remaining top recommendations matching your requirements:`,
-      suggestions: []
-    };
-  }
-
-  // F. Show Another Option
-  if (lowerCurrent.includes('another plan') || lowerCurrent.includes('another option') || lowerCurrent.includes('aur option') || lowerCurrent.includes('aur plan')) {
-    return {
-      intent: 'NEW_OPTION_REQUEST',
-      conversationStage: 'showing_recommendations',
-      showPlans: true,
-      requirements: accumulatedReqs,
-      reply: "Here are additional matching options from WHYINSURED:",
-      suggestions: []
-    };
-  }
-
-  // =========================================================================
-  // 7. INTENT: RECOMMENDATION_REQUEST & COMPANY PLAN REQUESTS
-  // =========================================================================
-  const isExplicitShowPlansRequest = (
-    lowerCurrent === 'show the plan' || lowerCurrent === 'show the plans' ||
-    lowerCurrent === 'show plan' || lowerCurrent === 'show plans' ||
-    lowerCurrent === 'show matching plans' || lowerCurrent === 'show me plans' ||
-    lowerCurrent === 'show me the plan' ||
-    lowerCurrent.includes('show') || lowerCurrent.includes('dikha') || lowerCurrent.includes('dikhao') ||
-    lowerCurrent.includes('recommend') || lowerCurrent.includes('options') || lowerCurrent.includes('which plan') ||
-    lowerCurrent.includes('which health insurance') ||
-    lowerCurrent.includes('kaunsa plan') || lowerCurrent === 'yes' || lowerCurrent === 'haan' ||
-    lowerCurrent === 'yep' || lowerCurrent === 'sure' || lowerCurrent.includes('yes show') ||
-    lowerCurrent.includes('show me') || lowerCurrent.includes('find best') || lowerCurrent.includes('suggest') ||
-    (accumulatedReqs.preferredInsurer && (lowerCurrent.includes('plan') || lowerCurrent.includes('policy') || lowerCurrent.includes('want') || lowerCurrent.includes('details') || lowerCurrent.includes('only in') || lowerCurrent.includes('only')))
+  // 8. Progressive Requirement Flow
+  // Initial requirement expression
+  const isInitialRequirement = (
+    lowerCurrent === 'i need a health plan' || lowerCurrent === 'i need health insurance' ||
+    lowerCurrent === 'i need insurance' || lowerCurrent === 'i want a health plan' ||
+    lowerCurrent === 'i want health insurance' || lowerCurrent.includes('looking for a health plan') ||
+    lowerCurrent.includes('help me find a health plan') || lowerCurrent.includes('help me find a plan')
   );
 
-  if (isExplicitShowPlansRequest && !isGeneralBestCompanyQuery) {
-    const insurerName = accumulatedReqs.preferredInsurer;
-    return {
-      intent: 'SHOW_RECOMMENDATIONS',
-      conversationStage: 'showing_recommendations',
-      showPlans: true,
-      requirements: accumulatedReqs,
-      reply: insurerName
-        ? `Here are the top ${insurerName} plan options matching your requirements:`
-        : "Here are the top plans that best match your requirements:",
-      suggestions: []
-    };
-  }
-
-  // Aditya Birla Inquiry / Preference (Informational only)
-  if (lowerCurrent.includes('aditya birla') || lowerCurrent.includes('aditya') || lowerCurrent.includes('birla')) {
-    const updatedReqs = { ...accumulatedReqs, preferredInsurer: 'Aditya Birla' };
-
-    if (lowerCurrent.includes('what about') || lowerCurrent.includes('tell me about') || lowerCurrent.includes('kaisa hai') || lowerCurrent.includes('me kya hai')) {
-      return {
-        intent: 'PLAN_QUERY',
-        conversationStage: 'collecting_requirements',
-        showPlans: false,
-        requirements: updatedReqs,
-        reply: "**Aditya Birla Health Insurance** offers **Activ One**, which includes:\n• **Up to 100% HealthReturns™ cashback** for maintaining healthy physical activity\n• **Day 1 Chronic Care Management** covering BP, Diabetes, Asthma & High Cholesterol\n• **100% Super Reload** of sum insured for same and unrelated illnesses\n• **Zero room-rent sub-limits** across variants.\n\nWould you like me to show you the best Aditya Birla plans?",
-        suggestions: []
-      };
-    }
-  }
-
-  // Star Health Inquiry (Informational only)
-  if (lowerCurrent.includes('star me koi plan') || lowerCurrent.includes('star me plan hai') || lowerCurrent.includes('star health plan') || (lowerCurrent.includes('star') && lowerCurrent.includes('about'))) {
-    return {
-      intent: 'PLAN_QUERY',
-      conversationStage: 'collecting_requirements',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "Yes! Star Health offers **Star Comprehensive**, which includes:\n• **Day 1 Maternity & Newborn Baby cover**\n• **Automatic 100% Basic Sum Insured Recharge**\n• **Single Private Room eligibility** with no sub-limits on standard treatments.\n\nWould you like to see Star Comprehensive details?",
-      suggestions: []
-    };
-  }
-
-  // HDFC Inquiry (Informational only)
-  if (
-    lowerCurrent.includes('hdfc wala') || lowerCurrent.includes('hdfc kaisa') ||
-    lowerCurrent.includes('what is hdfc') || lowerCurrent.includes('optima secure') ||
-    (lowerCurrent.includes('hdfc') && (lowerCurrent.includes('about') || lowerCurrent.includes('features')))
-  ) {
-    return {
-      intent: 'PLAN_QUERY',
-      conversationStage: 'collecting_requirements',
-      showPlans: false,
-      requirements: accumulatedReqs,
-      reply: "**HDFC ERGO Optima Secure+** is a top-tier comprehensive plan. Key advantages:\n• **2X Instant Coverage on Day 1**: Automatically doubles base cover via Secure Benefit.\n• **Unlimited Automatic Restore**: 100% reload for same and unrelated illnesses.\n• **Protect Plus Rider**: 100% cashless payment on non-medical hospital consumables.\n• **Zero Room Rent Capping**: Freedom to choose any hospital room category.",
-      suggestions: []
-    };
-  }
-
-  // =========================================================================
-  // 8. INTENT: REQUIREMENT_UPDATE & FOLLOW_UP_ANSWER (Progressive Questions)
-  // =========================================================================
-
-  // User expresses general requirement intent (e.g. "I need a health plan", "I need health insurance")
-  const isInitialRequirementIntent = (
-    lowerCurrent === 'i need a health plan' ||
-    lowerCurrent === 'i need health insurance' ||
-    lowerCurrent === 'i need insurance' ||
-    lowerCurrent === 'i want a health plan' ||
-    lowerCurrent === 'i want health insurance' ||
-    lowerCurrent === 'i need a plan' ||
-    lowerCurrent === 'i want a policy' ||
-    lowerCurrent === 'need insurance' ||
-    lowerCurrent === 'health insurance chahiye' ||
-    lowerCurrent === 'health plan chahiye' ||
-    lowerCurrent.includes('looking for health insurance') ||
-    lowerCurrent.includes('looking for a health plan') ||
-    lowerCurrent.includes('show me a suitable plan') ||
-    lowerCurrent.includes('recommend a health plan') ||
-    lowerCurrent.includes('help me find a health plan') ||
-    lowerCurrent.includes('help me find a plan')
-  );
-
-  if (isInitialRequirementIntent && !accumulatedReqs.relationship) {
+  if (isInitialRequirement && !accumulatedReqs.relationship) {
     return {
       intent: 'REQUIREMENT_UPDATE',
       conversationStage: 'collecting_requirements',
@@ -986,13 +472,23 @@ function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previous
     };
   }
 
-  // User specifies "myself" / "for myself" / "me"
-  if (
-    lowerCurrent.includes('for me') || lowerCurrent.includes('for myself') ||
-    lowerCurrent.includes('my self') || lowerCurrent.includes('myself') ||
-    lowerCurrent === 'me' ||
-    lowerCurrent.includes('plan for me') || lowerCurrent.includes('insurance for myself')
-  ) {
+  // Specifying parents
+  if (lowerCurrent.includes('parent') || lowerCurrent === 'parents' || lowerCurrent === 'my parents') {
+    accumulatedReqs.relationship = 'parents';
+    if (!accumulatedReqs.ages || (Array.isArray(accumulatedReqs.ages) && accumulatedReqs.ages.length === 0)) {
+      return {
+        intent: 'REQUIREMENT_UPDATE',
+        conversationStage: 'collecting_requirements',
+        showPlans: false,
+        requirements: accumulatedReqs,
+        reply: "Sure! What are the ages of your parents?",
+        suggestions: []
+      };
+    }
+  }
+
+  // Specifying self
+  if (lowerCurrent.includes('for myself') || lowerCurrent.includes('myself') || lowerCurrent === 'me' || lowerCurrent.includes('for me')) {
     accumulatedReqs.relationship = 'self';
     if (!accumulatedReqs.coverage) {
       return {
@@ -1000,43 +496,18 @@ function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previous
         conversationStage: 'collecting_requirements',
         showPlans: false,
         requirements: accumulatedReqs,
-        reply: "I can help you find the right health plan for yourself. What coverage amount are you looking for — for example ₹10 Lakh, ₹20 Lakh, or ₹50 Lakh?",
+        reply: "Got it, a plan for yourself. What coverage amount are you looking for — for example ₹10 Lakh, ₹20 Lakh, or ₹50 Lakh?",
         suggestions: []
       };
     }
   }
 
-  // User specifies "my parents" / "parents" / "for my parents"
-  if (
-    lowerCurrent.includes('parent') || lowerCurrent === 'parents' || lowerCurrent === 'my parents' ||
-    (lowerCurrent.includes('father') && !lowerCurrent.match(/\d{2}/)) ||
-    (lowerCurrent.includes('mother') && !lowerCurrent.match(/\d{2}/))
-  ) {
-    accumulatedReqs.relationship = 'parents';
-    if (!accumulatedReqs.ages || (Array.isArray(accumulatedReqs.ages) && accumulatedReqs.ages.length === 0)) {
-      let agePrompt = "Sure, I can help you with that! What are the ages of your parents?";
-      if (accumulatedReqs.coverage && accumulatedReqs.roomCategory) {
-        agePrompt = `Sure, I have noted ₹${accumulatedReqs.coverage} Lakh coverage and ${accumulatedReqs.roomCategory} for your parents. What are the ages of your parents?`;
-      } else if (accumulatedReqs.coverage) {
-        agePrompt = `Sure, I have noted ₹${accumulatedReqs.coverage} Lakh coverage for your parents. What are the ages of your parents?`;
-      }
-      return {
-        intent: 'REQUIREMENT_UPDATE',
-        conversationStage: 'collecting_requirements',
-        showPlans: false,
-        requirements: accumulatedReqs,
-        reply: agePrompt,
-        suggestions: []
-      };
-    }
-  }
-
-  // User provided ages (e.g. "father 45 and mother 36", "father 45 mother 36", "45 and 36")
+  // Storing ages
   const currentHasAges = (lowerCurrent.includes('father') || lowerCurrent.includes('mother') || lowerCurrent.match(/\b[2-9][0-9]\b/)) && !lowerCurrent.includes('lakh');
   if (currentHasAges && accumulatedReqs.ages && !accumulatedReqs.coverage) {
     let ageSummary = "your parents' ages";
     if (accumulatedReqs.ages && typeof accumulatedReqs.ages === 'object' && accumulatedReqs.ages.father && accumulatedReqs.ages.mother) {
-      ageSummary = `Father (${accumulatedReqs.ages.father}) and Mother (${accumulatedReqs.ages.mother})`;
+      ageSummary = `Mother (${accumulatedReqs.ages.mother}) and Father (${accumulatedReqs.ages.father})`;
     }
     return {
       intent: 'FOLLOW_UP_ANSWER',
@@ -1048,50 +519,36 @@ function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previous
     };
   }
 
-  // User mentions room preference (e.g. "single private room", "private room", "single room")
-  if (
-    lowerCurrent.includes('single private') || lowerCurrent.includes('private room') ||
-    lowerCurrent.includes('single room')
-  ) {
-    accumulatedReqs.roomCategory = 'Single Private Room';
-    accumulatedReqs.roomPreference = 'Single Private Room';
-    if (!accumulatedReqs.priorities.includes('single_private_room')) {
-      accumulatedReqs.priorities.push('single_private_room');
-    }
+  // Storing coverage
+  const currentHasCoverage = lowerCurrent.match(/(\d+)\s*(lakh|lakhs|l|cr|crore|lac|lacs)/i) || lowerCurrent.includes('20 lakh') || lowerCurrent.includes('10 lakh') || lowerCurrent.includes('50 lakh');
+  if (currentHasCoverage && accumulatedReqs.coverage && !accumulatedReqs.roomCategory) {
+    return {
+      intent: 'FOLLOW_UP_ANSWER',
+      conversationStage: 'collecting_requirements',
+      showPlans: false,
+      requirements: accumulatedReqs,
+      reply: `Noted — ₹${accumulatedReqs.coverage} Lakh coverage. Do you prefer a Single Private Room or have any room-category preference?`,
+      suggestions: []
+    };
+  }
 
+  // Storing room preference
+  if (lowerCurrent.includes('single private') || lowerCurrent.includes('private room') || lowerCurrent.includes('single room')) {
+    accumulatedReqs.roomCategory = 'Single Private Room';
     if (!accumulatedReqs.preferredInsurer) {
       return {
         intent: 'FOLLOW_UP_ANSWER',
         conversationStage: 'awaiting_plan_confirmation',
         showPlans: false,
         requirements: accumulatedReqs,
-        reply: "Noted — Single Private Room with zero sub-limits. Do you have a preferred insurer, or should I show matching plans?",
+        reply: "Noted — Single Private Room with zero sub-limits. Do you have a preferred insurer (like Tata AIG, HDFC ERGO), or should I show matching plans?",
         suggestions: []
       };
     }
   }
 
-  // User provided coverage (e.g. "20 lakh", "20 lakh coverage")
-  const currentHasCoverage = lowerCurrent.match(/(\d+)\s*(lakh|lakhs|l|cr|crore|lac|lacs)/i) || lowerCurrent.includes('20 lakh') || lowerCurrent.includes('10 lakh') || lowerCurrent.includes('50 lakh');
-  if (currentHasCoverage && accumulatedReqs.coverage) {
-    if (!accumulatedReqs.roomCategory) {
-      return {
-        intent: 'FOLLOW_UP_ANSWER',
-        conversationStage: 'collecting_requirements',
-        showPlans: false,
-        requirements: accumulatedReqs,
-        reply: `Noted — ₹${accumulatedReqs.coverage} Lakh coverage. Do you prefer a Single Private Room or have any room-category preference?`,
-        suggestions: []
-      };
-    }
-  }
-
-  // Preferred insurer stated directly (e.g. "tata aig", "only in tata aig", "only tata aig", "hdfc", "star health")
-  if (
-    accumulatedReqs.preferredInsurer &&
-    (lowerCurrent.includes('tata') || lowerCurrent.includes('hdfc') || lowerCurrent.includes('star') || lowerCurrent.includes('care') || lowerCurrent.includes('birla') || lowerCurrent.includes('niva') || lowerCurrent.includes('icici')) &&
-    !isGeneralBestCompanyQuery
-  ) {
+  // Storing preferred insurer
+  if (accumulatedReqs.preferredInsurer && (lowerCurrent.includes('tata') || lowerCurrent.includes('hdfc') || lowerCurrent.includes('star') || lowerCurrent.includes('care') || lowerCurrent.includes('birla') || lowerCurrent.includes('niva') || lowerCurrent.includes('icici'))) {
     let relationSummary = 'for yourself';
     if (accumulatedReqs.relationship === 'parents') {
       if (accumulatedReqs.ages && typeof accumulatedReqs.ages === 'object' && accumulatedReqs.ages.father && accumulatedReqs.ages.mother) {
@@ -1100,42 +557,42 @@ function fallbackSemanticAdvisor(userMessage, conversationHistory = [], previous
         relationSummary = 'your parents';
       }
     }
-
     return {
       intent: 'FOLLOW_UP_ANSWER',
       conversationStage: 'awaiting_plan_confirmation',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: `Got it. I have ${accumulatedReqs.preferredInsurer}, ₹${accumulatedReqs.coverage || 20} lakh, ${relationSummary}, and ${accumulatedReqs.roomCategory || 'Single Private Room'}. Would you like me to show the matching plan?`,
+      reply: `Got it! I have noted ${accumulatedReqs.preferredInsurer}, ₹${accumulatedReqs.coverage || 20} Lakh coverage, ${relationSummary}, and ${accumulatedReqs.roomCategory || 'Single Private Room'}. Would you like me to show the matching plan?`,
       suggestions: []
     };
   }
 
-  // Confirmation if full requirements exist
+  // General requirement readiness
   if (accumulatedReqs.relationship && accumulatedReqs.coverage) {
     return {
       intent: 'REQUIREMENT_UPDATE',
       conversationStage: 'awaiting_plan_confirmation',
       showPlans: false,
       requirements: accumulatedReqs,
-      reply: `I have noted your requirements for ${accumulatedReqs.relationship === 'parents' ? 'your parents' : 'yourself'} with ₹${accumulatedReqs.coverage} Lakh coverage. Would you like me to show you the matching plans?`,
+      reply: `I have noted your requirements for ${accumulatedReqs.relationship === 'parents' ? 'your parents' : 'yourself'} with ₹${accumulatedReqs.coverage} Lakh coverage. Would you like me to show the matching plans?`,
       suggestions: []
     };
   }
 
-  // Truly uninterpretable generic fallback
+  // Intelligent fallback for any other question
+  // Intelligent fallback for any other question
   return {
-    intent: 'REQUIREMENT_UPDATE',
-    conversationStage: 'collecting_requirements',
+    intent: 'GENERAL_HEALTH_INSURANCE_QUESTION',
+    conversationStage: 'general_information',
     showPlans: false,
     requirements: accumulatedReqs,
-    reply: "I'm here to help! You can ask any question about health insurance benefits, or tell me who you want coverage for (such as yourself or parents).",
+    reply: "Sure! I can explain health insurance, policy benefits, waiting periods, claims, room rent, restoration, and other insurance-related topics in simple language. Please ask me your question and I'll explain it with an example when useful.",
     suggestions: []
   };
 }
 
 /**
- * Extract requirements from conversation history
+ * Extract requirements from all user messages in conversation history
  */
 function extractRequirementsFromHistory(conversationHistory = []) {
   if (!Array.isArray(conversationHistory) || conversationHistory.length === 0) {
@@ -1166,28 +623,28 @@ function mergeRequirements(prev = {}, current = {}, userMessage = '') {
     return current || {};
   }
 
-  // If user is asking general best company query, reset preferredInsurer filter
-  const isGeneralCompanyQuery = (
-    lowerMsg.includes('best health insurance company') ||
-    lowerMsg.includes('best insurance company') ||
-    lowerMsg.includes('best health insurance provider') ||
-    lowerMsg.includes('best insurer') ||
-    lowerMsg.includes('top health insurance company') ||
-    lowerMsg.includes('top insurance company') ||
-    lowerMsg.includes('which insurance company is best') ||
-    lowerMsg.includes('which company is best') ||
-    lowerMsg.includes('best company for health insurance') ||
-    (lowerMsg.includes('best health insurance') && lowerMsg.includes('company'))
-  );
-
-  if (isGeneralCompanyQuery) {
+  // Clear preferred insurer if user is asking general best company query
+  if (isGeneralBestCompanyQuery(lowerMsg)) {
     merged.preferredInsurer = null;
   } else if (current.preferredInsurer) {
     merged.preferredInsurer = current.preferredInsurer;
   }
 
   if (current.relationship) merged.relationship = current.relationship;
-  if (current.ages) merged.ages = current.ages;
+
+  if (current.ages) {
+    if (typeof current.ages === 'object' && !Array.isArray(current.ages) && Object.keys(current.ages).length > 0) {
+      merged.ages = { ...(prev.ages || {}), ...current.ages };
+    } else if (Array.isArray(current.ages) && current.ages.length > 0) {
+      // If previous ages was structured { father, mother }, keep structured unless current has valid elements
+      if (prev.ages && typeof prev.ages === 'object' && !Array.isArray(prev.ages) && Object.keys(prev.ages).length > 0) {
+        // preserve structured ages
+      } else {
+        merged.ages = current.ages;
+      }
+    }
+  }
+
   if (current.coverage) merged.coverage = current.coverage;
   if (current.roomCategory) {
     merged.roomCategory = current.roomCategory;
@@ -1218,39 +675,64 @@ function extractRequirementsFromText(allText, lowerCurrent) {
   let relationship = null;
   const lowerAll = (allText || '').toLowerCase();
 
-  if (lowerAll.includes('parent') || lowerAll.includes('father') || lowerAll.includes('mother') || lowerAll.includes('pitaji') || lowerAll.includes('mataji')) {
+  const isParents = (
+    lowerAll.includes('parent') || lowerAll.includes('father') || lowerAll.includes('mother') ||
+    lowerAll.includes('pitaji') || lowerAll.includes('mataji')
+  );
+
+  const isFamily = (
+    lowerAll.includes('family') || lowerAll.includes('child') || lowerAll.includes('kid') ||
+    lowerAll.includes('spouse') || lowerAll.includes('wife')
+  );
+
+  const isSelf = (
+    lowerAll.includes('myself') || lowerAll.includes('my self') || lowerAll.includes('for me') ||
+    lowerAll.includes('for myself') || lowerAll.includes('individual') || lowerAll === 'me' ||
+    (/\bsingle\b/i.test(lowerAll) && !lowerAll.includes('single private') && !lowerAll.includes('single room'))
+  );
+
+  if (isParents) {
     relationship = 'parents';
-  } else if (lowerAll.includes('family') || lowerAll.includes('child') || lowerAll.includes('kid') || lowerAll.includes('spouse') || lowerAll.includes('wife')) {
+  } else if (isFamily) {
     relationship = 'family';
-  } else if (lowerAll.includes('myself') || lowerAll.includes('my self') || lowerAll.includes('for me') || lowerAll.includes('individual') || lowerAll.includes('single') || lowerAll === 'me') {
+  } else if (isSelf) {
     relationship = 'self';
   }
 
-  // Specific override if current message specifically changed relationship
+  // Specific override if current message changed relationship
   if (lowerCurrent.includes('parent') || lowerCurrent.includes('father') || lowerCurrent.includes('mother')) {
     relationship = 'parents';
-  } else if (lowerCurrent.includes('for myself') || lowerCurrent.includes('my self') || lowerCurrent.includes('myself') || lowerCurrent.includes('for me') || lowerCurrent.includes('plan for me') || lowerCurrent === 'me') {
+  } else if (lowerCurrent.includes('for myself') || lowerCurrent.includes('my self') || lowerCurrent.includes('myself') || lowerCurrent.includes('for me') || lowerCurrent === 'me') {
     relationship = 'self';
   }
 
   const structuredAges = {};
   const rawAges = [];
 
-  const fatherMatch = allText.match(/father\s*(?:is\s*)?(\d{2})/i);
+  // Father age match (e.g. "father 46", "father is 46", "father's age 46", "46 year old father")
+  const fatherMatch = allText.match(/(?:father|dad|pitaji)\s*(?:is|age|aged|'s age is)?\s*[:=]?\s*(\d{2})/i) ||
+    allText.match(/(\d{2})\s*(?:year|yr)?(?:s)?\s*(?:old)?\s*(?:father|dad|pitaji)/i);
   if (fatherMatch) {
     const fAge = parseInt(fatherMatch[1], 10);
-    structuredAges.father = fAge;
-    if (!rawAges.includes(fAge)) rawAges.push(fAge);
+    if (fAge >= 18 && fAge <= 99) {
+      structuredAges.father = fAge;
+      if (!rawAges.includes(fAge)) rawAges.push(fAge);
+    }
   }
 
-  const motherMatch = allText.match(/mother\s*(?:is\s*)?(\d{2})/i);
+  // Mother age match (e.g. "mother 40", "mother is 40", "mother's age 40", "40 year old mother", "mom 40")
+  const motherMatch = allText.match(/(?:mother|mom|mataji)\s*(?:is|age|aged|'s age is)?\s*[:=]?\s*(\d{2})/i) ||
+    allText.match(/(\d{2})\s*(?:year|yr)?(?:s)?\s*(?:old)?\s*(?:mother|mom|mataji)/i);
   if (motherMatch) {
     const mAge = parseInt(motherMatch[1], 10);
-    structuredAges.mother = mAge;
-    if (!rawAges.includes(mAge)) rawAges.push(mAge);
+    if (mAge >= 18 && mAge <= 99) {
+      structuredAges.mother = mAge;
+      if (!rawAges.includes(mAge)) rawAges.push(mAge);
+    }
   }
 
-  const ageMatches = allText.matchAll(/\b(?:age\s*|aged\s*|years\s*old\s*|\b)([2-9][0-9])\b/gi);
+  // Generic 2-digit age matching (avoid matching numbers followed by lakh, crore, %, etc.)
+  const ageMatches = allText.matchAll(/\b(?:age\s*|aged\s*|years\s*old\s*|\b)([2-9][0-9])\b(?!\s*(?:lakh|lakhs|lac|lacs|l\b|cr|crore|crores|k\b|%|percent|month|months|day|days))/gi);
   for (const match of ageMatches) {
     const ageNum = parseInt(match[1], 10);
     if (ageNum >= 18 && ageNum <= 99 && !rawAges.includes(ageNum)) {
@@ -1259,27 +741,36 @@ function extractRequirementsFromText(allText, lowerCurrent) {
   }
 
   let coverage = null;
-  const coverageMatch = allText.match(/(\d+)\s*(lakh|lakhs|l|cr|crore|lac|lacs)/i);
-  if (coverageMatch) {
-    const val = parseInt(coverageMatch[1], 10);
-    const unit = coverageMatch[2].toLowerCase();
-    if (unit.startsWith('cr')) {
-      coverage = val * 100;
-    } else {
-      coverage = val;
+  const isScenarioOrBill = (
+    lowerAll.includes('bill') || lowerAll.includes('kharcha') || lowerAll.includes('cost') ||
+    lowerAll.includes('expense') || lowerAll.includes('claim') || lowerAll.includes('hospital me') ||
+    lowerAll.includes('agar') || lowerAll.includes('what if') || lowerAll.includes('maan lo') ||
+    lowerAll.includes('example') || lowerAll.includes('suppose') || lowerAll.includes('admitted')
+  );
+
+  if (!isScenarioOrBill) {
+    const coverageMatch = allText.match(/(\d+)\s*(lakh|lakhs|l|cr|crore|lac|lacs)/i);
+    if (coverageMatch) {
+      const val = parseInt(coverageMatch[1], 10);
+      const unit = coverageMatch[2].toLowerCase();
+      if (unit.startsWith('cr')) {
+        coverage = val * 100;
+      } else {
+        coverage = val;
+      }
+    } else if (lowerAll.includes('50 lakh') || lowerAll.includes('50l') || lowerAll.includes('50 lac')) {
+      coverage = 50;
+    } else if (lowerAll.includes('20 lakh') || lowerAll.includes('20l') || lowerAll.includes('20 lac')) {
+      coverage = 20;
+    } else if (lowerAll.includes('15l') || lowerAll.includes('15 lakh')) {
+      coverage = 15;
+    } else if (lowerAll.includes('10l') || lowerAll.includes('10 lakh')) {
+      coverage = 10;
+    } else if (lowerAll.includes('25l') || lowerAll.includes('25 lakh')) {
+      coverage = 25;
+    } else if (lowerAll.includes('1 cr') || lowerAll.includes('1 crore')) {
+      coverage = 100;
     }
-  } else if (lowerAll.includes('50 lakh') || lowerAll.includes('50l') || lowerAll.includes('50 lac')) {
-    coverage = 50;
-  } else if (lowerAll.includes('20 lakh') || lowerAll.includes('20l') || lowerAll.includes('20 lac')) {
-    coverage = 20;
-  } else if (lowerAll.includes('15l') || lowerAll.includes('15 lakh')) {
-    coverage = 15;
-  } else if (lowerAll.includes('10l') || lowerAll.includes('10 lakh')) {
-    coverage = 10;
-  } else if (lowerAll.includes('25l') || lowerAll.includes('25 lakh')) {
-    coverage = 25;
-  } else if (lowerAll.includes('1 cr') || lowerAll.includes('1 crore')) {
-    coverage = 100;
   }
 
   let preferredInsurer = null;
@@ -1299,29 +790,16 @@ function extractRequirementsFromText(allText, lowerCurrent) {
     preferredInsurer = 'ICICI Lombard';
   }
 
-  const isExclusionMessage = (
-    lowerCurrent.includes('remove') || lowerCurrent.includes('exclude') || 
-    lowerCurrent.includes('hata do') || lowerCurrent.includes('mat dikhao') || 
+  const isExclusion = (
+    lowerCurrent.includes('remove') || lowerCurrent.includes('exclude') ||
+    lowerCurrent.includes('hata do') || lowerCurrent.includes('mat dikhao') ||
     lowerCurrent.includes('nahi chahiye')
   );
 
-  const isGeneralCompanyQuery = (
-    lowerCurrent.includes('best health insurance company') ||
-    lowerCurrent.includes('best insurance company') ||
-    lowerCurrent.includes('best health insurance provider') ||
-    lowerCurrent.includes('best insurer') ||
-    lowerCurrent.includes('top health insurance company') ||
-    lowerCurrent.includes('top insurance company') ||
-    lowerCurrent.includes('which insurance company is best') ||
-    lowerCurrent.includes('which company is best') ||
-    lowerCurrent.includes('best company for health insurance') ||
-    (lowerCurrent.includes('best health insurance') && lowerCurrent.includes('company'))
-  );
-
-  if (isExclusionMessage || isGeneralCompanyQuery) {
+  if (isExclusion || isGeneralBestCompanyQuery(lowerCurrent)) {
     preferredInsurer = null;
   } else {
-    // Active message insurer override
+    // Current message insurer preference override
     if (lowerCurrent.includes('star')) {
       preferredInsurer = 'Star Health';
     } else if (lowerCurrent.includes('aditya') || lowerCurrent.includes('birla')) {
