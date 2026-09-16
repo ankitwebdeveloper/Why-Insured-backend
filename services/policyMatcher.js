@@ -61,14 +61,133 @@ function generatePolicySpecificReason(policy, reqCoverage, requirements = {}) {
   }
 }
 
+function normalizeCoverage(rawCoverage) {
+  if (rawCoverage === null || rawCoverage === undefined || rawCoverage === '') return null;
+  if (typeof rawCoverage === 'number' && !isNaN(rawCoverage)) return rawCoverage;
+  
+  const str = String(rawCoverage).toLowerCase().trim().replace(/,/g, '');
+  
+  // Check Crore first (e.g. "1 crore", "1cr", "2 crore", "₹2cr")
+  const crMatch = str.match(/(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:cr|crore|crores)/i);
+  if (crMatch) {
+    return Math.round(parseFloat(crMatch[1]) * 100);
+  }
+
+  // Check Lakh (e.g. "20 lakh", "20l", "20 lac", "₹20 lakh", "₹20l")
+  const lakhMatch = str.match(/(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|lac|lacs|l)\b/i);
+  if (lakhMatch) {
+    return parseFloat(lakhMatch[1]);
+  }
+
+  // Check plain number (e.g. "20", "50", "₹20")
+  const plainMatch = str.match(/(?:₹\s*)?(\d+(?:\.\d+)?)/);
+  if (plainMatch) {
+    const num = parseFloat(plainMatch[1]);
+    if (num >= 100000) {
+      return num / 100000;
+    }
+    return num;
+  }
+
+  return null;
+}
+
+function matchesInsurer(policy, pref) {
+  if (!pref) return false;
+  const cleanPref = pref.toLowerCase().trim();
+  const cleanComp = policy.company.toLowerCase().trim();
+  const cleanId = policy.companyId.toLowerCase().trim();
+
+  // Normalize spaces and hyphens
+  const normPref = cleanPref.replace(/[-_]/g, ' ').replace(/\s+/g, ' ');
+  const normComp = cleanComp.replace(/[-_]/g, ' ').replace(/\s+/g, ' ');
+  const normId = cleanId.replace(/[-_]/g, ' ').replace(/\s+/g, ' ');
+
+  // Exact / substring on full name
+  if (normComp === normPref || normId === normPref) return true;
+  if (normComp.includes(normPref) || normPref.includes(normComp)) return true;
+  if (normId.includes(normPref) || normPref.includes(normId)) return true;
+
+  // Token-level safe matching
+  const prefTokens = normPref.split(' ');
+
+  // Tata AIG / TATA
+  if (prefTokens.includes('tata')) {
+    return normId.includes('tata') || normComp.includes('tata');
+  }
+
+  // HDFC ERGO / HDFC
+  if (prefTokens.includes('hdfc')) {
+    return normId.includes('hdfc') || normComp.includes('hdfc');
+  }
+
+  // Star Health / Star
+  if (prefTokens.includes('star')) {
+    return normId.includes('star') || normComp.includes('star');
+  }
+
+  // Niva Bupa / Niva / Bupa
+  if (prefTokens.includes('niva') || prefTokens.includes('bupa')) {
+    return normId.includes('niva') || normComp.includes('niva');
+  }
+
+  // ICICI Lombard / ICICI / Lombard
+  if (prefTokens.includes('icici') || prefTokens.includes('lombard')) {
+    return normId.includes('icici') || normComp.includes('icici');
+  }
+
+  // Aditya Birla / Birla / Aditya
+  if (prefTokens.includes('aditya') || prefTokens.includes('birla')) {
+    return normId.includes('aditya') || normComp.includes('aditya');
+  }
+
+  // Care Health / Care (avoid matching "Medicare" in policy IDs/names)
+  if (prefTokens.includes('care')) {
+    return normId === 'care-health' || normComp.startsWith('care');
+  }
+
+  return false;
+}
+
+function checkRoomRequirement(policy, reqRoom) {
+  if (!reqRoom) return { satisfies: true, matchedText: null };
+  const lower = reqRoom.toLowerCase();
+  
+  // Single Private Room / Private Room request
+  if (lower.includes('single') || lower.includes('private')) {
+    const pCat = (policy.roomCategory || '').toLowerCase();
+    const hasSingleOrAny = pCat.includes('single') || pCat.includes('private') || pCat.includes('any') || pCat.includes('no room rent');
+    if (!policy.roomRentCapping && hasSingleOrAny) {
+      return { satisfies: true, matchedText: 'Single Private Room eligibility with zero sub-limits' };
+    }
+    return { satisfies: false };
+  }
+
+  // No Room Rent Capping request
+  if (lower.includes('no room') || lower.includes('no capping') || lower.includes('capping') || lower.includes('limit')) {
+    if (!policy.roomRentCapping) {
+      return { satisfies: true, matchedText: 'No room rent capping across all hospital rooms' };
+    }
+    return { satisfies: false };
+  }
+
+  // Default: if no conflict
+  if (!policy.roomRentCapping) {
+    return { satisfies: true, matchedText: 'Zero room-rent sub-limits' };
+  }
+
+  return { satisfies: false };
+}
+
 /**
  * Match and rank policies based on extracted user requirements
  * 
  * @param {Object} requirements
- * @param {number} [requirements.coverage] - Desired sum insured in Lakhs (e.g. 20, 50)
+ * @param {number|string} [requirements.coverage] - Desired sum insured in Lakhs (e.g. 20, 50, "20 lakh")
  * @param {string} [requirements.relationship] - "parents" | "family" | "individual" | "senior"
  * @param {number[]|Object} [requirements.ages] - Member ages (e.g. [45, 39] or { father: 45, mother: 39 })
- * @param {string} [requirements.preferredInsurer] - e.g. "Aditya Birla", "HDFC ERGO"
+ * @param {string} [requirements.preferredInsurer] - e.g. "Aditya Birla", "HDFC ERGO", "Tata AIG"
+ * @param {string} [requirements.roomCategory] - e.g. "Single Private Room", "No Room Rent Capping"
  * @param {string[]} [requirements.priorities] - e.g. ["comprehensive_addons", "low_waiting_period", "unlimited_restoration"]
  * @param {string[]} [requirements.preExistingDiseases] - e.g. ["diabetes", "hypertension"]
  * @param {number} [limit=4] - Max number of recommendations to return
@@ -76,12 +195,16 @@ function generatePolicySpecificReason(policy, reqCoverage, requirements = {}) {
  * @returns {Array} Ranked list of matching policies with match scores & reasons
  */
 export function matchPolicies(requirements = {}, limit = 4, excludeCompanyIds = []) {
-  const reqCoverage = requirements.coverage ? Number(requirements.coverage) : null;
+  const reqCoverage = normalizeCoverage(requirements.coverage);
   const relationship = (requirements.relationship || '').toLowerCase();
   const priorities = (requirements.priorities || []).map(p => p.toLowerCase());
   const diseases = (requirements.preExistingDiseases || []).map(d => d.toLowerCase());
-  const preferredInsurer = (requirements.preferredInsurer || '').toLowerCase();
+  const preferredInsurer = (requirements.preferredInsurer || '').trim();
+  const reqRoom = requirements.roomCategory || requirements.roomPreference || 
+    (priorities.includes('single_private_room') ? 'Single Private Room' : (priorities.includes('no_room_rent_capping') ? 'No Room Rent Capping' : null));
   const normalizedExclusions = (excludeCompanyIds || []).map(c => c.toLowerCase());
+  
+  const hasSpecificInsurerMatch = Boolean(preferredInsurer && POLICY_CATALOG.some(p => matchesInsurer(p, preferredInsurer)));
 
   // Extract numeric member ages
   let memberAges = [];
@@ -96,45 +219,69 @@ export function matchPolicies(requirements = {}, limit = 4, excludeCompanyIds = 
   const scoredPolicies = [];
 
   for (const policy of POLICY_CATALOG) {
-    // Check exclusion
+    // 1. Check exclusions (HARD FILTER)
     if (normalizedExclusions.some(ex => policy.companyId.includes(ex) || policy.id.includes(ex))) {
       continue;
     }
 
+    // 2. Preferred Insurer (HARD FILTER)
+    if (hasSpecificInsurerMatch && !matchesInsurer(policy, preferredInsurer)) {
+      continue;
+    }
+
+    // 3. Exact Requested Coverage (HARD FILTER)
+    if (reqCoverage) {
+      const isExactAvailable = Array.isArray(policy.availableSumsInsuredLakh) && policy.availableSumsInsuredLakh.includes(reqCoverage);
+      if (!isExactAvailable) {
+        continue;
+      }
+    }
+
+    // 4. Room Requirement (HARD FILTER)
+    if (reqRoom) {
+      const roomCheck = checkRoomRequirement(policy, reqRoom);
+      if (!roomCheck.satisfies) {
+        continue;
+      }
+    }
+
+    // 5. Entry Age / Eligibility (HARD FILTER)
+    if (maxMemberAge && policy.maxEntryAge && maxMemberAge > policy.maxEntryAge) {
+      continue;
+    }
+
+    // =========================================================================
+    // SCORING PHASE (Only policies that passed all hard filters reach here)
+    // =========================================================================
     let coverageScore = 0;
     let benefitsScore = 0;
     let eligibilityScore = 0;
     let roomRentScore = 0;
-    let networkScore = 0;
+    let networkScore = 10;
     let insurerBoost = 0;
 
     const matchedRequirements = [];
 
     // Preferred Insurer Match Bonus
-    if (preferredInsurer) {
-      if (policy.company.toLowerCase().includes(preferredInsurer) || policy.companyId.includes(preferredInsurer) || preferredInsurer.includes(policy.companyId)) {
-        insurerBoost = 35; // Strongly prioritize requested insurer
-        matchedRequirements.push(`Direct match for requested insurer: ${policy.company}`);
-      }
+    if (preferredInsurer && matchesInsurer(policy, preferredInsurer)) {
+      insurerBoost = 35; // Strongly prioritize requested insurer
+      matchedRequirements.push(`Direct match for requested insurer: ${policy.company}`);
     }
 
-    // 1. COVERAGE MATCH (Max 30 points)
+    // Coverage Score
     if (reqCoverage) {
-      const isExactAvailable = policy.availableSumsInsuredLakh && policy.availableSumsInsuredLakh.includes(reqCoverage);
-      
-      if (isExactAvailable) {
-        coverageScore = 30;
-        matchedRequirements.push(`Offers exact ₹${reqCoverage} Lakh Sum Insured option`);
-      } else if (reqCoverage <= policy.maxSumInsuredLakh && reqCoverage >= policy.minSumInsuredLakh) {
-        // Within range, adjacent tier
-        coverageScore = 20;
-        matchedRequirements.push(`Coverage available within requested range (${policy.coverageDisplay})`);
-      } else {
-        // Requested Sum Insured is completely unavailable for this plan (e.g. ₹50L requested on a 20L max policy)
-        continue;
-      }
+      coverageScore = 30;
+      matchedRequirements.push(`Offers exact ₹${reqCoverage} Lakh Sum Insured option`);
     } else {
       coverageScore = 20; // Baseline when no specific coverage is specified
+    }
+
+    // Room matched requirement text
+    if (reqRoom) {
+      const roomCheck = checkRoomRequirement(policy, reqRoom);
+      if (roomCheck.matchedText) {
+        matchedRequirements.push(roomCheck.matchedText);
+      }
     }
 
     // 2. REQUESTED BENEFITS & ADD-ONS MATCH (Max 30 points)

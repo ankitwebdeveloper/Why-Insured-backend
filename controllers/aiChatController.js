@@ -34,7 +34,8 @@ export async function handleAiChat(req, res) {
     let recommendations = [];
 
     // 2. Only match and attach policy recommendation cards when user explicitly requests to see plans
-    if (aiAnalysis.showPlans || aiAnalysis.intent === 'show_recommendations') {
+    const intentUpper = (aiAnalysis.intent || '').toUpperCase();
+    if (aiAnalysis.showPlans || intentUpper === 'SHOW_RECOMMENDATIONS' || intentUpper === 'RECOMMENDATION_REQUEST') {
       recommendations = matchPolicies(aiAnalysis.requirements || {}, 4, aiAnalysis.excludeCompanies || []);
     }
 

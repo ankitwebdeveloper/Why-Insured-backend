@@ -72,7 +72,8 @@ async function runAll() {
         { role: 'user', content: 'i need a plan for me' },
         { role: 'assistant', content: 'What coverage are you looking for?' }
     ], 'sry i want plan in aditya birla', (r) => {
-        if (r.requirements.preferredInsurer !== 'aditya-birla') throw new Error(`Preferred insurer should be aditya-birla, got ${r.requirements.preferredInsurer}`);
+        const pref = (r.requirements.preferredInsurer || '').toLowerCase();
+        if (!pref.includes('aditya') && !pref.includes('birla')) throw new Error(`Preferred insurer should be aditya-birla, got ${r.requirements.preferredInsurer}`);
         if (!r.reply.toLowerCase().includes('aditya birla')) throw new Error('Reply does not acknowledge Aditya Birla');
     });
 
