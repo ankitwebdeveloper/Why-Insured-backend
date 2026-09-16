@@ -9,7 +9,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { analyzePolicy, downloadPolicyPdf } from '../controllers/policyController.js';
+import { analyzePolicy, downloadPolicyPdf, askPolicyQuestion } from '../controllers/policyController.js';
 
 const router = express.Router();
 
@@ -89,7 +89,10 @@ router.get('/analyze', (req, res) => {
 // 2. Analyze Policy PDF
 router.post('/analyze', handleUploadMiddleware, analyzePolicy);
 
-// 3. Download Generated Simplified Policy PDF
+// 3. Ask Policy Question with Official-Source Verification
+router.post('/ask', express.json(), askPolicyQuestion);
+
+// 4. Download Generated Simplified Policy PDF
 router.get('/download/:fileId', downloadPolicyPdf);
 
 export default router;

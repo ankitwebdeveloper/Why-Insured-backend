@@ -2,18 +2,19 @@
  * policyController.js
  * 
  * Handles policy PDF upload, text extraction, Gemini AI analysis,
- * easy-language PDF generation, and temporary file download.
+ * official-source verification engine, easy-language PDF generation,
+ * and temporary file download.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import os from 'os';
 import { extractTextFromPdf } from '../services/policyPdfExtractor.js';
 import { analyzePolicyDocument } from '../services/policyAnalyzerService.js';
 import { generateEasyPolicyPdf } from '../services/easyPolicyPdfGenerator.js';
-
-import os from 'os';
+import { answerPolicyQuestionWithOfficialVerification } from '../services/officialPolicyVerificationService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,6 +44,9 @@ try {
 // In-memory store for generated file metadata with expiry tracking
 const generatedFilesRegistry = new Map();
 
+// In-memory store for uploaded policy analysis sessions for interactive Q&A
+const policySessionsRegistry = new Map();
+
 // Helper to schedule cleanup of generated PDF files after 1 hour
 const scheduleFileCleanup = (fileId, filePath) => {
   setTimeout(() => {
@@ -51,6 +55,7 @@ const scheduleFileCleanup = (fileId, filePath) => {
         fs.unlinkSync(filePath);
       }
       generatedFilesRegistry.delete(fileId);
+      policySessionsRegistry.delete(fileId);
     } catch (err) {
       console.warn(`[Policy Controller] Error cleaning up temporary file ${fileId}:`, err.message);
     }
@@ -59,7 +64,8 @@ const scheduleFileCleanup = (fileId, filePath) => {
 
 /**
  * POST /api/policy/analyze
- * Analyzes uploaded health insurance policy PDF and generates simplified PDF.
+ * Analyzes uploaded health insurance policy PDF, extracts product identity,
+ * and generates simplified PDF.
  */
 export async function analyzePolicy(req, res) {
   let uploadedFilePath = null;
@@ -132,7 +138,7 @@ export async function analyzePolicy(req, res) {
       });
     }
 
-    // 6. Gemini AI Policy Analysis
+    // 6. Gemini AI Policy Analysis & Product Identification
     const analysisResult = await analyzePolicyDocument(extractedData);
 
     // 7. Generate Easy Policy PDF
@@ -147,6 +153,23 @@ export async function analyzePolicy(req, res) {
       name: `WHYINSURED-Easy-Policy-${file.originalname ? file.originalname.replace(/\.pdf$/i, '') : 'Summary'}.pdf`,
       createdAt: Date.now()
     });
+
+    // Store policy context for interactive Q&A
+    policySessionsRegistry.set(fileId, {
+      fileId,
+      fileName: file.originalname,
+      extractedData: {
+        totalPages: extractedData.totalPages,
+        fullText: extractedData.fullText
+      },
+      analysisResult,
+      identifiedProduct: analysisResult.identifiedProduct || {
+        insurer: analysisResult.policyDetails?.insurer || 'Health Insurance Company',
+        productName: analysisResult.policyDetails?.policyName || 'Health Plan'
+      },
+      createdAt: Date.now()
+    });
+
     scheduleFileCleanup(fileId, generatedPdfPath);
 
     // Cleanup uploaded raw file immediately
@@ -155,7 +178,7 @@ export async function analyzePolicy(req, res) {
       uploadedFilePath = null;
     }
 
-    // 8. Return response with download URL
+    // 8. Return response with download URL + Identified Product + Analysis Context
     return res.json({
       success: true,
       message: 'Policy analyzed successfully',
@@ -164,12 +187,21 @@ export async function analyzePolicy(req, res) {
         name: 'WHYINSURED-Easy-Policy.pdf',
         url: `/api/policy/download/${fileId}`
       },
+      identifiedProduct: analysisResult.identifiedProduct || {
+        insurer: analysisResult.policyDetails?.insurer || 'Health Insurance',
+        productName: analysisResult.policyDetails?.policyName || 'Health Plan',
+        variant: analysisResult.policyDetails?.policyType || null,
+        uin: null,
+        versionDate: null,
+        documentType: 'Policy Document'
+      },
       summary: {
         insurer: analysisResult.policyDetails?.insurer || 'Health Insurance',
         policyName: analysisResult.policyDetails?.policyName || 'Standard Plan',
         sumInsured: analysisResult.policyDetails?.sumInsured || 'As per schedule',
         totalPages: extractedData.totalPages
-      }
+      },
+      analysis: analysisResult
     });
   } catch (error) {
     console.error('[Policy Controller] Analyze error:', error);
@@ -186,6 +218,69 @@ export async function analyzePolicy(req, res) {
     return res.status(500).json({
       success: false,
       message: "We couldn't analyze this policy. Please try uploading the PDF again."
+    });
+  }
+}
+
+/**
+ * POST /api/policy/ask
+ * Interactive Official-Source Verification Question Endpoint.
+ * Searches uploaded PDF first; if incomplete/missing, verifies with official insurer document.
+ */
+export async function askPolicyQuestion(req, res) {
+  try {
+    const { fileId, question, policyContext } = req.body;
+
+    if (!question || typeof question !== 'string' || !question.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Question is required.'
+      });
+    }
+
+    // Resolve context from session registry or client payload
+    let resolvedContext = null;
+    if (fileId && policySessionsRegistry.has(fileId)) {
+      const session = policySessionsRegistry.get(fileId);
+      resolvedContext = {
+        fullText: session.extractedData?.fullText || '',
+        analysisResult: session.analysisResult || {},
+        identifiedProduct: session.identifiedProduct || {},
+        pages: []
+      };
+    } else if (policyContext && typeof policyContext === 'object') {
+      resolvedContext = {
+        fullText: policyContext.fullText || '',
+        analysisResult: policyContext.analysis || policyContext.analysisResult || {},
+        identifiedProduct: policyContext.identifiedProduct || {},
+        pages: []
+      };
+    } else {
+      resolvedContext = {
+        fullText: '',
+        analysisResult: {},
+        identifiedProduct: {},
+        pages: []
+      };
+    }
+
+    // Run official verification flow
+    const verifiedResponse = await answerPolicyQuestionWithOfficialVerification(
+      question.trim(),
+      resolvedContext
+    );
+
+    return res.json({
+      success: true,
+      ...verifiedResponse
+    });
+  } catch (error) {
+    console.error('[Policy Controller] Ask question error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process question. Please try asking again.',
+      directAnswer: 'This detail could not be verified from the available policy documents.',
+      sourceType: 'unverified'
     });
   }
 }

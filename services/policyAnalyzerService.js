@@ -77,6 +77,14 @@ For every extracted section/fact, include the relevant policy page number in "so
 
 REQUIRED JSON SCHEMA:
 {
+  "identifiedProduct": {
+    "insurer": "Exact Insurer Name (e.g. Tata AIG General Insurance Company Limited, HDFC ERGO General Insurance Co. Ltd., Care Health, Star Health, Niva Bupa)",
+    "productName": "Exact Product Name (e.g. MediCare Select, Optima Secure, Care Supreme, ReAssure 2.0)",
+    "variant": "Plan Variant / Tier if mentioned, else null",
+    "uin": "Unique Identification Number (UIN) if found, else null",
+    "versionDate": "Policy wording version or date if found, else null",
+    "documentType": "Policy Wording / Policy Schedule / Certificate of Insurance / Prospectus / Brochure / CIS"
+  },
   "policyDetails": {
     "insurer": "Name of insurer (e.g. HDFC ERGO, Care Health, Star Health, Niva Bupa) or 'Not mentioned in the uploaded policy'",
     "policyName": "Name of policy plan or 'Not mentioned in the uploaded policy'",
@@ -196,6 +204,14 @@ REQUIRED JSON SCHEMA:
       if (parsed && typeof parsed === 'object') {
         // Normalize schema to ensure all top-level objects & arrays exist
         return {
+          identifiedProduct: parsed.identifiedProduct || {
+            insurer: parsed.policyDetails?.insurer || 'Health Insurance Company',
+            productName: parsed.policyDetails?.policyName || 'Health Plan',
+            variant: parsed.policyDetails?.policyType || null,
+            uin: null,
+            versionDate: null,
+            documentType: 'Policy Document'
+          },
           policyDetails: parsed.policyDetails || {
             insurer: 'Health Insurance Policy',
             policyName: 'Standard Policy',
@@ -234,18 +250,27 @@ function generateRuleBasedFallbackAnalysis(extractedData) {
 
   // Detect Insurer
   let insurer = 'Health Insurance Policy';
-  if (lower.includes('hdfc ergo')) insurer = 'HDFC ERGO';
-  else if (lower.includes('star health')) insurer = 'Star Health';
-  else if (lower.includes('care health') || lower.includes('religare')) insurer = 'Care Health';
-  else if (lower.includes('niva bupa') || lower.includes('max bupa')) insurer = 'Niva Bupa';
-  else if (lower.includes('tata aig')) insurer = 'Tata AIG';
-  else if (lower.includes('icici lombard')) insurer = 'ICICI Lombard';
-  else if (lower.includes('aditya birla')) insurer = 'Aditya Birla Health';
+  let productName = 'Health Plan';
+  if (lower.includes('hdfc ergo')) { insurer = 'HDFC ERGO'; productName = 'Optima Secure'; }
+  else if (lower.includes('tata aig')) { insurer = 'Tata AIG'; productName = 'MediCare Select'; }
+  else if (lower.includes('star health')) { insurer = 'Star Health'; productName = 'Star Comprehensive'; }
+  else if (lower.includes('care health') || lower.includes('religare')) { insurer = 'Care Health'; productName = 'Care Supreme'; }
+  else if (lower.includes('niva bupa') || lower.includes('max bupa')) { insurer = 'Niva Bupa'; productName = 'ReAssure 2.0'; }
+  else if (lower.includes('icici lombard')) { insurer = 'ICICI Lombard'; productName = 'Health AdvantEdge'; }
+  else if (lower.includes('aditya birla')) { insurer = 'Aditya Birla Health'; productName = 'Activ Health'; }
 
   return {
+    identifiedProduct: {
+      insurer,
+      productName,
+      variant: 'Comprehensive Cover',
+      uin: null,
+      versionDate: null,
+      documentType: 'Policy Document'
+    },
     policyDetails: {
       insurer,
-      policyName: 'Health Insurance Policy',
+      policyName: productName,
       policyType: 'Comprehensive Health Cover',
       policyNumber: 'Not mentioned in uploaded document',
       policyPeriod: 'Annual Policy',
