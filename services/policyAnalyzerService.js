@@ -65,71 +65,96 @@ export async function analyzePolicyDocument(extractedData) {
   const { pages, totalPages } = extractedData;
   const documentContent = prepareDocumentChunks(pages);
 
-  const systemInstruction = `You are a health insurance policy document analyzer for WHYINSURED.
+  const systemInstruction = `You are an expert health insurance policy document analyzer for WHYINSURED.
 Analyze ONLY the information present in the uploaded policy document.
 Do not assume, invent, infer or fill missing information from general insurance knowledge.
+Extract policyholder personal and insured member details if present in the document. If personal details (e.g. specific customer name, date of birth, policy number) are not present in the document (such as in a general policy wording prospectus), do NOT invent them; leave them null or state 'Not mentioned in the uploaded policy'.
 Convert complex insurance wording into simple, easy-to-understand language.
 Preserve the exact meaning, limits, sub-limits, co-payments, and conditions of the original policy.
-If a detail is not found in the document, return 'Not clearly mentioned in the uploaded policy'.
 Do not claim that something is covered unless the policy document supports it.
 Do not claim that something is excluded unless the policy document supports it.
-Always preserve important conditions, limits, waiting periods, sub-limits, deductibles, co-pay requirements and exclusions.
-For every important fact, include the relevant policy page number in "sourcePage" (an integer, e.g. 4, or null if unknown).
+For every extracted section/fact, include the relevant policy page number in "sourcePage" (an integer, e.g. 4, or null if not identified).
 
 REQUIRED JSON SCHEMA:
 {
   "policyDetails": {
-    "insurer": "Name of insurer (e.g. HDFC ERGO, Care Health, Star Health, etc.) or 'Not specified'",
-    "policyName": "Name of policy plan or 'Not specified'",
-    "policyType": "Individual / Family Floater / Group or 'Not specified'",
-    "sumInsured": "Base Sum Insured amount if mentioned, else 'Not specified in this document'",
-    "policyPeriod": "Policy duration (e.g. 1 Year, 2 Years) or 'Not specified'"
+    "insurer": "Name of insurer (e.g. HDFC ERGO, Care Health, Star Health, Niva Bupa) or 'Not mentioned in the uploaded policy'",
+    "policyName": "Name of policy plan or 'Not mentioned in the uploaded policy'",
+    "policyType": "Individual / Family Floater / Group / Top-up or 'Not mentioned in the uploaded policy'",
+    "policyNumber": "Policy number or Certificate number if found, else null",
+    "policyPeriod": "Policy period or date range (e.g. 01 Jan 2026 – 31 Dec 2026, 1 Year) if found, else 'Not mentioned in the uploaded policy'",
+    "policyStartDate": "Start date if explicitly mentioned, else null",
+    "policyEndDate": "End date if explicitly mentioned, else null",
+    "sumInsured": "Base Sum Insured amount (e.g. ₹10 Lakh, ₹5,00,000) if found, else 'Not mentioned in the uploaded policy'"
+  },
+  "policyholderDetails": {
+    "policyholderName": "Primary proposer/policyholder name if explicitly mentioned, else null",
+    "memberId": "Member ID / Customer ID / Certificate ID if explicitly mentioned, else null",
+    "age": "Age or DOB if mentioned, else null",
+    "gender": "Gender if mentioned, else null"
+  },
+  "insuredPersons": [
+    {
+      "name": "Insured Person Name",
+      "relationship": "Self / Spouse / Son / Daughter / Father / Mother / Dependent",
+      "age": "Age / DOB if mentioned, else null",
+      "gender": "Male / Female if mentioned, else null",
+      "sumInsured": "Sum Insured for this member if specified, else null"
+    }
+  ],
+  "highlights": {
+    "sumInsured": "e.g. ₹10 Lakh or null if not found",
+    "roomCategory": "e.g. Single Private Room / No Capping / 1% SI or null if not found",
+    "initialWaitingPeriod": "e.g. 30 Days or null if not found",
+    "restoration": "e.g. 100% Once a Year / Unlimited Refill or null if not found"
   },
   "coverage": [
     {
-      "title": "Hospitalisation / Room Category / ICU / Pre-Post / Daycare / Ambulance / etc.",
-      "simpleExplanation": "Easy language explanation of what is covered and under what conditions.",
+      "title": "Hospitalisation / Room Category / ICU / Pre-Post / Day Care / Ambulance / etc.",
+      "simpleExplanation": "Easy English explanation of what is covered and key conditions.",
       "sourcePage": 1
     }
   ],
   "keyBenefits": [
     {
-      "title": "Restoration / No Claim Bonus / Health Checkup / OPD / Maternity / etc.",
-      "simpleExplanation": "Easy language explanation of the benefit and its rules.",
+      "title": "Restoration / No Claim Bonus (NCB) / Health Checkup / OPD / Modern Treatments",
+      "simpleExplanation": "Easy English explanation of the benefit and how it works.",
       "sourcePage": 1
     }
   ],
   "waitingPeriods": [
     {
-      "title": "Initial 30 Days / Specific Illnesses / Pre-Existing Diseases (PED) / Maternity",
-      "simpleExplanation": "Easy language explanation of the waiting duration and applicability.",
+      "periodName": "Initial Waiting Period / Specific Illnesses / Pre-Existing Diseases (PED) / Maternity",
+      "duration": "Duration (e.g. 30 Days, 24 Months, 36 Months, 48 Months)",
+      "explanation": "Simple explanation of what this waiting period means for the policyholder.",
       "sourcePage": 1
     }
   ],
   "limitsAndConditions": [
     {
-      "title": "Room Rent Limit / Co-pay / Deductibles / Sub-limits / Zone rules",
-      "simpleExplanation": "Easy language explanation of restrictions that apply during a claim.",
+      "conditionName": "Room Rent Limit / Co-payment / Deductible / Sub-limit / Zone Restriction",
+      "limitValue": "Specific limit (e.g. Single Private Room, 20% Co-pay, ₹50,000 Cataract limit) if specified",
+      "simpleExplanation": "Clear explanation of the condition/restriction.",
       "sourcePage": 1
     }
   ],
   "exclusions": [
     {
-      "title": "Permanent Exclusions / Non-payable items / Cosmetic / Experimental",
-      "simpleExplanation": "Easy language explanation of what will NOT be paid by the insurer.",
+      "title": "Permanent Exclusions / Non-Medical Consumables / Cosmetic / Substance Abuse",
+      "simpleExplanation": "Clear, simple explanation of what will NOT be paid by the insurer.",
       "sourcePage": 1
     }
   ],
   "importantThingsToKnow": [
     {
-      "title": "Claim Intimation Timelines / Network Rules / Cashless vs Reimbursement / Grievance",
-      "simpleExplanation": "Key practical rules every policyholder must know before hospital admission.",
+      "title": "Claim Intimation Timelines / Cashless Network Rules / Pre-Auth / Grievance Redressal",
+      "simpleExplanation": "Key actionable rules the policyholder must remember before hospital admission.",
       "sourcePage": 1
     }
   ]
 }`;
 
-  const userPrompt = `Here is the complete text of the health insurance policy document (${totalPages} total pages):\n\n${documentContent}\n\nPlease analyze this document and generate the complete structured easy-language policy analysis JSON according to the schema provided.`;
+  const userPrompt = `Here is the complete text of the health insurance policy document (${totalPages} total pages):\n\n${documentContent}\n\nPlease analyze this document and generate the complete structured easy-language policy analysis JSON according to the schema provided. Remember: extract personal/policyholder details and insured persons only if present in the document. Do not invent details.`;
 
   let lastError = null;
 
@@ -145,7 +170,7 @@ REQUIRED JSON SCHEMA:
         ],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 3500,
+          maxOutputTokens: 3800,
           responseMimeType: 'application/json'
         }
       };
@@ -169,7 +194,7 @@ REQUIRED JSON SCHEMA:
       const parsed = safelyParseJson(rawText);
 
       if (parsed && typeof parsed === 'object') {
-        // Normalize schema to ensure all top-level arrays exist
+        // Normalize schema to ensure all top-level objects & arrays exist
         return {
           policyDetails: parsed.policyDetails || {
             insurer: 'Health Insurance Policy',
@@ -178,6 +203,9 @@ REQUIRED JSON SCHEMA:
             sumInsured: 'As per policy schedule',
             policyPeriod: '1 Year'
           },
+          policyholderDetails: parsed.policyholderDetails || null,
+          insuredPersons: Array.isArray(parsed.insuredPersons) ? parsed.insuredPersons : [],
+          highlights: parsed.highlights || null,
           coverage: Array.isArray(parsed.coverage) ? parsed.coverage : [],
           keyBenefits: Array.isArray(parsed.keyBenefits) ? parsed.keyBenefits : [],
           waitingPeriods: Array.isArray(parsed.waitingPeriods) ? parsed.waitingPeriods : [],
@@ -219,8 +247,17 @@ function generateRuleBasedFallbackAnalysis(extractedData) {
       insurer,
       policyName: 'Health Insurance Policy',
       policyType: 'Comprehensive Health Cover',
-      sumInsured: 'As specified in your policy schedule',
-      policyPeriod: 'Annual Policy'
+      policyNumber: 'Not mentioned in uploaded document',
+      policyPeriod: 'Annual Policy',
+      sumInsured: 'As specified in policy schedule'
+    },
+    policyholderDetails: null,
+    insuredPersons: [],
+    highlights: {
+      sumInsured: 'As per Schedule',
+      roomCategory: 'Single Private Room',
+      initialWaitingPeriod: '30 Days',
+      restoration: '100% Once a Year'
     },
     coverage: [
       {
@@ -263,30 +300,35 @@ function generateRuleBasedFallbackAnalysis(extractedData) {
     ],
     waitingPeriods: [
       {
-        title: 'Initial Waiting Period (30 Days)',
-        simpleExplanation: 'No non-accidental illness claims are covered during the first 30 days from policy inception.',
+        periodName: 'Initial Waiting Period',
+        duration: '30 Days',
+        explanation: 'No non-accidental illness claims are covered during the first 30 days from policy inception.',
         sourcePage: 1
       },
       {
-        title: 'Specific Disease Waiting Period (24 Months)',
-        simpleExplanation: 'Treatments for specific conditions like cataract, hernia, joint replacement, and kidney stones require 24 months of waiting.',
+        periodName: 'Specific Illnesses Waiting Period',
+        duration: '24 Months',
+        explanation: 'Treatments for specific conditions like cataract, hernia, joint replacement, and kidney stones require 24 months of continuous coverage.',
         sourcePage: 1
       },
       {
-        title: 'Pre-Existing Diseases (PED) Waiting Period',
-        simpleExplanation: 'Pre-existing medical conditions disclosed at inception are covered after 24 to 36 months of continuous coverage.',
+        periodName: 'Pre-Existing Diseases (PED)',
+        duration: '24–36 Months',
+        explanation: 'Pre-existing medical conditions declared at inception are covered after the waiting period is served.',
         sourcePage: 1
       }
     ],
     limitsAndConditions: [
       {
-        title: 'Room Rent Category Condition',
-        simpleExplanation: 'Check your policy schedule for room rent limits. Choosing a higher room category may trigger proportionate deductions on total hospital bills.',
+        conditionName: 'Room Rent Category Condition',
+        limitValue: 'Single Private Room',
+        simpleExplanation: 'Choosing a higher room category than permitted may trigger proportionate deductions on total hospital bills.',
         sourcePage: 1
       },
       {
-        title: 'Co-payment / Deductible Requirements',
-        simpleExplanation: 'If voluntary co-pay or zone co-pay was selected at inception, the specified percentage must be borne by the policyholder during claims.',
+        conditionName: 'Co-payment / Deductible Requirements',
+        limitValue: 'As per Schedule',
+        simpleExplanation: 'If voluntary co-pay or zone co-pay was selected at inception, the specified percentage must be borne during claims.',
         sourcePage: 1
       }
     ],
