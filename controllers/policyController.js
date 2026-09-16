@@ -13,18 +13,31 @@ import { extractTextFromPdf } from '../services/policyPdfExtractor.js';
 import { analyzePolicyDocument } from '../services/policyAnalyzerService.js';
 import { generateEasyPolicyPdf } from '../services/easyPolicyPdfGenerator.js';
 
+import os from 'os';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const TEMP_UPLOADS_DIR = path.join(__dirname, '..', 'uploads', 'temp');
-const GENERATED_PDFS_DIR = path.join(__dirname, '..', 'uploads', 'generated');
+const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true' || Boolean(process.env.VERCEL);
+const baseStorageDir = isVercel ? os.tmpdir() : path.join(__dirname, '..', 'uploads');
 
-// Ensure temporary working directories exist
-if (!fs.existsSync(TEMP_UPLOADS_DIR)) {
-  fs.mkdirSync(TEMP_UPLOADS_DIR, { recursive: true });
+const TEMP_UPLOADS_DIR = path.join(baseStorageDir, 'temp');
+const GENERATED_PDFS_DIR = path.join(baseStorageDir, 'generated');
+
+// Ensure temporary working directories exist safely
+try {
+  if (!fs.existsSync(TEMP_UPLOADS_DIR)) {
+    fs.mkdirSync(TEMP_UPLOADS_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignore read-only fs error
 }
-if (!fs.existsSync(GENERATED_PDFS_DIR)) {
-  fs.mkdirSync(GENERATED_PDFS_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(GENERATED_PDFS_DIR)) {
+    fs.mkdirSync(GENERATED_PDFS_DIR, { recursive: true });
+  }
+} catch (e) {
+  // Ignore read-only fs error
 }
 
 // In-memory store for generated file metadata with expiry tracking

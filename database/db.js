@@ -56,9 +56,13 @@ function readData() {
 
 // Internal helper to write data atomically
 function writeData(data) {
-  const tempPath = `${dbFilePath}.tmp`;
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tempPath, dbFilePath);
+  try {
+    const tempPath = `${dbFilePath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tempPath, dbFilePath);
+  } catch (err) {
+    console.warn('[Database] Read-only filesystem detected on serverless runtime. In-memory data active.');
+  }
 }
 
 // Generic CRUD collection builder
