@@ -40,7 +40,7 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
       conversationStage: 'greeting',
       showPlans: false,
       requirements: {},
-      reply: "Hi! 👋 I'm your WHYINSURED Advisor. Think of me as your insurance friend — you can ask me anything about health insurance, or tell me what kind of plan you're looking for.",
+      reply: "Hi! 👋 How can I help you with health insurance today?",
       suggestions: []
     };
     return defaultGreeting;
@@ -71,7 +71,8 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
   let finalResult = null;
 
   // 5. Layer A: Call Gemini if API key is configured
-  if (GEMINI_API_KEY && GEMINI_API_KEY.trim() !== 'your_api_key_here' && GEMINI_API_KEY.trim() !== '') {
+  const hasKey = Boolean(GEMINI_API_KEY && GEMINI_API_KEY.trim() !== 'your_api_key_here' && GEMINI_API_KEY.trim() !== '');
+  if (hasKey) {
     try {
       const geminiResult = await callGeminiApiWithRetry(cleanMessage, recentHistory, mergedReqs, 2);
       if (geminiResult && geminiResult.reply && typeof geminiResult.reply === 'string') {
@@ -80,6 +81,8 @@ export async function analyzeRequirementWithGemini(userMessage, conversationHist
     } catch (apiError) {
       console.warn('[Gemini Service] Handled API error (switching to safety fallback):', apiError.message);
     }
+  } else {
+    console.warn('[Gemini Service] GEMINI_API_KEY is missing or empty. Using safety fallback advisor.');
   }
 
   // 6. Safety Net: If Gemini was unavailable, timed out, or failed, use semantic fallback advisor
@@ -153,6 +156,7 @@ You possess deep knowledge of health insurance principles, hospital billing, cla
 
 CORE DIRECTIVE — DYNAMIC & INTELLIGENT QUESTION ANSWERING:
 - You must understand ANY question asked by the user in their own words, including:
+  * Greetings (e.g. "hii", "hi", "hello", "hey", "namaste") -> Respond with a warm, friendly greeting such as "Hi! 👋 How can I help you with health insurance today?"
   * Spelling mistakes or typos (e.g. "n you tellmabout health insurance" -> "Can you tell me about health insurance?")
   * Hinglish / Hindi queries (e.g. "room rent kya hota h", "agar hospital me 2 lakh ka bill aa gya", "parents ke liye kya dekhna chahiye", "claim kaise karte hain")
   * Incomplete or short queries (e.g. "restoration?", "deductible meaning", "10L vs 20L")
@@ -182,6 +186,7 @@ Return ONLY a valid JSON object matching this structure:
 
   for (const model of GEMINI_MODELS) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const startTime = Date.now();
       try {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
         const payload = {
@@ -206,11 +211,13 @@ Return ONLY a valid JSON object matching this structure:
         });
 
         if (response.status === 404 || response.status === 429) {
-          // Try next candidate model
+          const errData = await response.json().catch(() => ({}));
+          console.warn(`[Gemini API] Model ${model} returned ${response.status}: ${errData?.error?.message || 'Quota/Not Found'}. Trying next candidate model...`);
           break;
         }
 
         if (response.status === 503) {
+          console.warn(`[Gemini API] Model ${model} returned 503 Service Unavailable (attempt ${attempt}/${maxAttempts}).`);
           if (attempt < maxAttempts) {
             await wait(800);
             continue;
@@ -219,16 +226,21 @@ Return ONLY a valid JSON object matching this structure:
         }
 
         if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          console.warn(`[Gemini API] Model ${model} error ${response.status}: ${errData?.error?.message || response.statusText}`);
           break;
         }
 
         const data = await response.json();
+        const duration = Date.now() - startTime;
         const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
         const parsedJson = safelyParseGeminiJson(rawText);
         if (parsedJson && parsedJson.reply) {
+          console.log(`[Gemini API] Successfully generated response with model ${model} in ${duration}ms`);
           return parsedJson;
         }
       } catch (err) {
+        console.warn(`[Gemini API] Network/timeout exception on model ${model} (attempt ${attempt}/${maxAttempts}): ${err.message}`);
         if (attempt < maxAttempts) {
           await wait(800);
           continue;
