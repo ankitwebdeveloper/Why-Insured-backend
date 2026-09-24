@@ -266,13 +266,14 @@ export const POLICY_CATALOG = [
     waitingPeriodInitialDays: 30,
     waitingPeriodSpecificMonths: 24,
     waitingPeriodPedMonths: 24,
-    restorationType: 'Cumulative Bonus & 100% Restore',
+    restorationType: 'Restore Infinity Plus (Unlimited Restorations)',
     hasConsumablesCover: true,
-    hasUnlimitedRestore: false,
+    hasUnlimitedRestore: true,
     restorationFeatures: [
+      'Restore Infinity Plus: 100% Base SI restored unlimited times in a policy year',
       'Cumulative Bonus up to 100% without reduction on claim',
       '540+ Day Care procedures covered cashless',
-      'Pre-hospitalization (30 days) & Post-hospitalization (60 days)',
+      'Pre-hospitalization (90 days) & Post-hospitalization (90 days)',
       'Consumables benefit rider available'
     ],
     maternityCover: false,
@@ -280,10 +281,10 @@ export const POLICY_CATALOG = [
     cashlessHospitals: '10,000+ network hospitals',
     bestSuitedFor: ['budget', 'family', 'parents', '15 lakh', 'low waiting period', 'day care'],
     highlights: [
+      'Restore Infinity Plus: Unlimited restorations of 100% Base SI',
       'Cumulative Bonus up to 100% without reduction on claim',
-      'Pre-hospitalization (30 days) & Post-hospitalization (60 days)',
-      '540+ Day Care procedures covered cashless',
-      'Consumables benefit rider available'
+      'Pre-hospitalization (90 days) & Post-hospitalization (90 days)',
+      '540+ Day Care procedures covered cashless'
     ],
     link: '/insurance/tata-aig/medicare-select'
   },
