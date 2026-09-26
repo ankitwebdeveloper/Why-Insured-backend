@@ -2,7 +2,8 @@
  * easyPolicyPdfGenerator.js
  * 
  * Server-side PDF Generator for WHYINSURED Easy Policy Document.
- * Uses PDFKit to produce a premium, beautifully formatted, zero-blank-page report.
+ * Uses PDFKit to produce a premium, beautifully formatted, zero-overlapping,
+ * fully dynamic layout that handles variable-length content and pagination seamlessly.
  */
 
 import PDFDocument from 'pdfkit';
@@ -36,7 +37,7 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
 
       const doc = new PDFDocument({
         size: 'A4',
-        margins: { top: 35, bottom: 40, left: 40, right: 40 },
+        margins: { top: 36, bottom: 40, left: 40, right: 40 },
         bufferPages: true,
         autoFirstPage: true
       });
@@ -56,24 +57,151 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
       const amberBorder = '#FDE68A';       // Amber 200
       const amberText = '#92400E';         // Amber 800
 
-      const pageWidth = 515; // 595.28 - 40 - 40 = 515.28
+      const pageWidth = 515;               // A4: 595.28 - 40 - 40 = 515.28
       const leftMargin = 40;
-      const bottomLimit = 780;
+      const bottomLimit = 772;             // Safe margin before footer divider at 810
 
       /**
-       * Safe space check: If adding a block with `heightNeeded` exceeds page bottom, add new page first.
+       * Safe space check: If adding a block with `heightNeeded` exceeds page bottom,
+       * advance to a fresh page cleanly.
+       * Returns true if a page break occurred.
        */
-      const checkPageBreak = (heightNeeded) => {
+      const ensureSpace = (heightNeeded) => {
         if (doc.y + heightNeeded > bottomLimit) {
           doc.addPage();
+          doc.y = 40;
+          return true;
         }
+        return false;
+      };
+
+      /**
+       * Render Section Heading helper
+       * Ensures heading and at least one item fit on the current page to prevent orphans.
+       */
+      const renderSectionHeading = (title, minContentHeight = 65) => {
+        ensureSpace(32 + minContentHeight);
+
+        // Comfortable separation between sections if not at page top
+        if (doc.y > 45) {
+          doc.y += 10;
+        }
+
+        const headingY = doc.y;
+
+        // Emerald accent indicator bar
+        doc.roundedRect(leftMargin, headingY + 1, 3.5, 14, 1.5).fill(brandEmerald);
+
+        doc.fillColor(primaryDark)
+          .fontSize(11)
+          .font('Helvetica-Bold')
+          .text(title, leftMargin + 10, headingY + 1, { width: pageWidth - 10 });
+
+        doc.y = headingY + 20;
+      };
+
+      /**
+       * Render a Dynamic Card for Policy Clauses, Coverages, Benefits, Exclusions, etc.
+       * Uses exact text measurement to compute dynamic height so that no text ever overlaps,
+       * no container is cut off, and cards break cleanly to the next page when needed.
+       */
+      const renderDynamicItemCard = ({
+        title,
+        subtitle = '',
+        explanation = '',
+        sourcePage = null,
+        accentColor = brandEmerald
+      }) => {
+        const cleanTitle = cleanCurrency(title) || 'Policy Clause';
+        const cleanSub = subtitle ? cleanCurrency(subtitle) : '';
+        const cleanExpl = cleanCurrency(explanation) || '';
+        const sourceText = sourcePage ? `Source: Policy page ${sourcePage}` : '';
+
+        const padX = 10;
+        const padY = 7;
+        const innerWidth = pageWidth - padX * 2;
+
+        // 1. Measure Title and Source Tag
+        const sourceWidth = sourceText ? 95 : 0;
+        const titleWidth = sourceWidth ? innerWidth - sourceWidth - 8 : innerWidth;
+
+        doc.font('Helvetica-Bold').fontSize(8.5);
+        const titleHeight = doc.heightOfString(cleanTitle, { width: titleWidth, lineGap: 1.2 });
+
+        // 2. Measure Subtitle (if present)
+        let subHeight = 0;
+        if (cleanSub) {
+          doc.font('Helvetica-Bold').fontSize(7.5);
+          subHeight = doc.heightOfString(cleanSub, { width: innerWidth, lineGap: 1.2 });
+        }
+
+        // 3. Measure Explanation
+        doc.font('Helvetica').fontSize(7.5);
+        const explHeight = cleanExpl
+          ? doc.heightOfString(cleanExpl, { width: innerWidth, lineGap: 1.5 })
+          : 0;
+
+        // 4. Calculate total card height dynamically
+        const gapAfterTitle = cleanSub ? 3 : (cleanExpl ? 4 : 0);
+        const gapAfterSub = cleanExpl ? 3 : 0;
+        const cardHeight = Math.ceil(padY + titleHeight + gapAfterTitle + (cleanSub ? subHeight + gapAfterSub : 0) + explHeight + padY);
+
+        // 5. Ensure space on current page; if it doesn't fit, move cleanly to next page
+        ensureSpace(cardHeight + 4);
+
+        const cardY = doc.y;
+
+        // 6. Draw Card Background & Border
+        doc.roundedRect(leftMargin, cardY, pageWidth, cardHeight, 4)
+          .fillAndStroke(bgCard, borderCard);
+
+        // 7. Draw Left Accent Indicator Line
+        doc.roundedRect(leftMargin, cardY, 3.5, cardHeight, 1)
+          .fill(accentColor);
+
+        // 8. Render Title
+        let cursorY = cardY + padY;
+        doc.fillColor(primaryDark)
+          .font('Helvetica-Bold')
+          .fontSize(8.5)
+          .text(cleanTitle, leftMargin + padX, cursorY, { width: titleWidth, lineGap: 1.2 });
+
+        // 9. Render Source Tag
+        if (sourceText) {
+          doc.fillColor(textMuted)
+            .font('Helvetica')
+            .fontSize(6.8)
+            .text(sourceText, leftMargin + pageWidth - sourceWidth - padX, cursorY + 1, { width: sourceWidth, align: 'right' });
+        }
+
+        cursorY += titleHeight + gapAfterTitle;
+
+        // 10. Render Subtitle (if present)
+        if (cleanSub) {
+          doc.fillColor(accentColor)
+            .font('Helvetica-Bold')
+            .fontSize(7.5)
+            .text(cleanSub, leftMargin + padX, cursorY, { width: innerWidth, lineGap: 1.2 });
+          cursorY += subHeight + gapAfterSub;
+        }
+
+        // 11. Render Explanation
+        if (cleanExpl) {
+          doc.fillColor(textSecondary)
+            .font('Helvetica')
+            .fontSize(7.5)
+            .text(cleanExpl, leftMargin + padX, cursorY, { width: innerWidth, lineGap: 1.5 });
+        }
+
+        // 12. Advance doc.y after card with consistent gap
+        doc.y = cardY + cardHeight + 6;
       };
 
       // =====================================================================
       // 1. PREMIUM HEADER BANNER
       // =====================================================================
-      const headerTop = 35;
-      const headerHeight = 72;
+      const headerTop = 36;
+      const headerHeight = 70;
       
       // Top Dark Navy Box
       doc.roundedRect(leftMargin, headerTop, pageWidth, headerHeight, 6)
@@ -83,33 +211,33 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
       doc.fillColor('#FFFFFF')
         .fontSize(16)
         .font('Helvetica-Bold')
-        .text('WHYINSURED', leftMargin + 16, headerTop + 14);
+        .text('WHYINSURED', leftMargin + 16, headerTop + 13);
 
       // Tagline
       doc.fillColor(brandEmerald)
         .fontSize(10)
         .font('Helvetica-Bold')
-        .text('Your Health Insurance Policy — Explained Simply', leftMargin + 16, headerTop + 34);
+        .text('Your Health Insurance Policy — Explained Simply', leftMargin + 16, headerTop + 33);
 
       // Subtitle
       doc.fillColor('#94A3B8')
         .fontSize(7.5)
         .font('Helvetica')
-        .text('An easy-language explanation of your uploaded policy document', leftMargin + 16, headerTop + 50);
+        .text('An easy-language explanation of your uploaded policy document', leftMargin + 16, headerTop + 49);
 
       // Right metadata tag
       const reportDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
       doc.fillColor('#94A3B8')
         .fontSize(7.5)
         .font('Helvetica')
-        .text(`Date: ${reportDate}`, leftMargin + pageWidth - 140, headerTop + 15, { width: 125, align: 'right' });
+        .text(`Date: ${reportDate}`, leftMargin + pageWidth - 145, headerTop + 15, { width: 130, align: 'right' });
 
       doc.fillColor('#38BDF8')
         .fontSize(7.5)
         .font('Helvetica-Bold')
-        .text('Official Policy Report', leftMargin + pageWidth - 140, headerTop + 28, { width: 125, align: 'right' });
+        .text('Official Policy Report', leftMargin + pageWidth - 145, headerTop + 28, { width: 130, align: 'right' });
 
-      doc.y = headerTop + headerHeight + 12;
+      doc.y = headerTop + headerHeight + 10;
 
       // =====================================================================
       // 2. IMPORTANT HIGHLIGHTS SUMMARY CARDS (4-Grid)
@@ -130,12 +258,21 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
       ];
 
       const cardWidth = (pageWidth - 18) / 4;
-      const cardHeight = 40;
+
+      // Dynamically measure maximum value height across the 4 cards so none are truncated
+      let maxValH = 12;
+      statCards.forEach((card) => {
+        doc.font('Helvetica-Bold').fontSize(8);
+        const vH = doc.heightOfString(card.value, { width: cardWidth - 12, lineGap: 1 });
+        if (vH > maxValH) maxValH = vH;
+      });
+
+      const statCardHeight = Math.max(42, Math.ceil(6 + 10 + 2 + maxValH + 6));
       const cardStartY = doc.y;
 
       statCards.forEach((card, idx) => {
         const cardX = leftMargin + idx * (cardWidth + 6);
-        doc.roundedRect(cardX, cardStartY, cardWidth, cardHeight, 5)
+        doc.roundedRect(cardX, cardStartY, cardWidth, statCardHeight, 5)
           .fillAndStroke(bgCard, borderCard);
 
         // Top accent line
@@ -150,44 +287,23 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
         doc.fillColor(primaryDark)
           .fontSize(8)
           .font('Helvetica-Bold')
-          .text(card.value, cardX + 6, cardStartY + 18, { width: cardWidth - 12, ellipsis: true });
+          .text(card.value, cardX + 6, cardStartY + 18, { width: cardWidth - 12, lineGap: 1 });
       });
 
-      doc.y = cardStartY + cardHeight + 12;
-
-      /**
-       * Render Section Heading helper
-       */
-      const renderSectionHeading = (title) => {
-        checkPageBreak(40);
-        const headingY = doc.y;
-
-        // Accent indicator bar
-        doc.roundedRect(leftMargin, headingY + 1, 3.5, 13, 1.5).fill(brandEmerald);
-
-        doc.fillColor(primaryDark)
-          .fontSize(11)
-          .font('Helvetica-Bold')
-          .text(title, leftMargin + 10, headingY + 1);
-
-        doc.y = headingY + 18;
-      };
+      doc.y = cardStartY + statCardHeight + 10;
 
       // =====================================================================
       // 3. POLICY OVERVIEW CARD
       // =====================================================================
-      renderSectionHeading('Policy Overview');
-
-      const overviewHeight = 52;
-      checkPageBreak(overviewHeight);
-      const overviewStartY = doc.y;
-
-      doc.roundedRect(leftMargin, overviewStartY, pageWidth, overviewHeight, 5)
-        .fillAndStroke(bgCard, borderCard);
+      renderSectionHeading('Policy Overview', 65);
 
       const col1X = leftMargin + 10;
       const col2X = leftMargin + 180;
       const col3X = leftMargin + 350;
+
+      const col1Width = 160;
+      const col2Width = 160;
+      const col3Width = 150;
 
       const pInsurer = cleanCurrency(policyDetails.insurer || 'Health Insurance Company');
       const pName = cleanCurrency(policyDetails.policyName || 'Standard Medical Plan');
@@ -196,104 +312,164 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
       const pPolicyNo = cleanCurrency(policyDetails.policyNumber || 'Not mentioned in policy wording');
       const pSumInsured = cleanCurrency(policyDetails.sumInsured || 'Refer to Policy Schedule');
 
-      // Row 1
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('INSURANCE COMPANY', col1X, overviewStartY + 6);
-      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pInsurer, col1X, overviewStartY + 15, { width: 155, ellipsis: true });
+      // Dynamically measure heights for Row 1
+      doc.font('Helvetica-Bold').fontSize(8);
+      const hInsurer = doc.heightOfString(pInsurer, { width: col1Width, lineGap: 1 });
+      const hName = doc.heightOfString(pName, { width: col2Width, lineGap: 1 });
+      const hType = doc.heightOfString(pType, { width: col3Width, lineGap: 1 });
+      const row1ValH = Math.max(hInsurer, hName, hType, 11);
 
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY NAME', col2X, overviewStartY + 6);
-      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pName, col2X, overviewStartY + 15, { width: 160, ellipsis: true });
+      // Dynamically measure heights for Row 2
+      const hSI = doc.heightOfString(pSumInsured, { width: col1Width, lineGap: 1 });
+      doc.font('Helvetica').fontSize(8);
+      const hPeriod = doc.heightOfString(pPeriod, { width: col2Width, lineGap: 1 });
+      const hPolicyNo = doc.heightOfString(pPolicyNo, { width: col3Width, lineGap: 1 });
+      const row2ValH = Math.max(hSI, hPeriod, hPolicyNo, 11);
 
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY TYPE', col3X, overviewStartY + 6);
-      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pType, col3X, overviewStartY + 15, { width: 150, ellipsis: true });
+      const labelH = 9;
+      const rowGap = 9;
+      const padY = 8;
 
-      // Row 2
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('SUM INSURED', col1X, overviewStartY + 29);
-      doc.fillColor(brandEmerald).fontSize(8).font('Helvetica-Bold').text(pSumInsured, col1X, overviewStartY + 38, { width: 155, ellipsis: true });
+      const row1LabelY = padY;
+      const row1ValY = row1LabelY + labelH + 2;
+      const row1Bottom = row1ValY + row1ValH;
 
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY PERIOD / DATES', col2X, overviewStartY + 29);
-      doc.fillColor(textPrimary).fontSize(8).font('Helvetica').text(pPeriod, col2X, overviewStartY + 38, { width: 160, ellipsis: true });
+      const row2LabelY = row1Bottom + rowGap;
+      const row2ValY = row2LabelY + labelH + 2;
+      const row2Bottom = row2ValY + row2ValH;
 
-      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY NUMBER', col3X, overviewStartY + 29);
-      doc.fillColor(textPrimary).fontSize(8).font('Helvetica').text(pPolicyNo, col3X, overviewStartY + 38, { width: 150, ellipsis: true });
+      const overviewHeight = Math.ceil(row2Bottom + padY);
 
-      doc.y = overviewStartY + overviewHeight + 12;
+      ensureSpace(overviewHeight + 6);
+      const overviewStartY = doc.y;
+
+      doc.roundedRect(leftMargin, overviewStartY, pageWidth, overviewHeight, 5)
+        .fillAndStroke(bgCard, borderCard);
+
+      // Render Row 1
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('INSURANCE COMPANY', col1X, overviewStartY + row1LabelY);
+      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pInsurer, col1X, overviewStartY + row1ValY, { width: col1Width, lineGap: 1 });
+
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY NAME', col2X, overviewStartY + row1LabelY);
+      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pName, col2X, overviewStartY + row1ValY, { width: col2Width, lineGap: 1 });
+
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY TYPE', col3X, overviewStartY + row1LabelY);
+      doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold').text(pType, col3X, overviewStartY + row1ValY, { width: col3Width, lineGap: 1 });
+
+      // Render Row 2
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('SUM INSURED', col1X, overviewStartY + row2LabelY);
+      doc.fillColor(brandEmerald).fontSize(8).font('Helvetica-Bold').text(pSumInsured, col1X, overviewStartY + row2ValY, { width: col1Width, lineGap: 1 });
+
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY PERIOD / DATES', col2X, overviewStartY + row2LabelY);
+      doc.fillColor(textPrimary).fontSize(8).font('Helvetica').text(pPeriod, col2X, overviewStartY + row2ValY, { width: col2Width, lineGap: 1 });
+
+      doc.fillColor(textMuted).fontSize(6.8).font('Helvetica-Bold').text('POLICY NUMBER', col3X, overviewStartY + row2LabelY);
+      doc.fillColor(textPrimary).fontSize(8).font('Helvetica').text(pPolicyNo, col3X, overviewStartY + row2ValY, { width: col3Width, lineGap: 1 });
+
+      doc.y = overviewStartY + overviewHeight + 10;
 
       // =====================================================================
       // 4. POLICYHOLDER & COVERED PERSONS ("Who Is Covered?")
       // =====================================================================
-      renderSectionHeading('Who Is Covered? (Policyholder & Insured Members)');
+      renderSectionHeading('Who Is Covered? (Policyholder & Insured Members)', 40);
 
       const policyholder = analysis.policyholderDetails;
       const insuredPersons = Array.isArray(analysis.insuredPersons) ? analysis.insuredPersons.filter(p => p && p.name) : [];
 
-      if (insuredPersons.length > 0 || (policyholder && policyholder.policyholderName)) {
-        const rowHeight = 18;
-        checkPageBreak(rowHeight * 2 + 20);
-
-        const tableY = doc.y;
-        doc.roundedRect(leftMargin, tableY, pageWidth, 18, 4).fill('#F1F5F9');
+      const renderInsuredTableHeader = (y) => {
+        doc.roundedRect(leftMargin, y, pageWidth, 18, 4).fill('#F1F5F9');
         doc.fillColor(primaryDark).fontSize(7.2).font('Helvetica-Bold');
-        doc.text('INSURED MEMBER NAME', leftMargin + 8, tableY + 5);
-        doc.text('RELATIONSHIP', leftMargin + 160, tableY + 5);
-        doc.text('AGE / DOB', leftMargin + 260, tableY + 5);
-        doc.text('GENDER', leftMargin + 325, tableY + 5);
-        doc.text('SUM INSURED / ID', leftMargin + 400, tableY + 5);
+        doc.text('INSURED MEMBER NAME', leftMargin + 8, y + 5);
+        doc.text('RELATIONSHIP', leftMargin + 160, y + 5);
+        doc.text('AGE / DOB', leftMargin + 260, y + 5);
+        doc.text('GENDER', leftMargin + 325, y + 5);
+        doc.text('SUM INSURED / ID', leftMargin + 400, y + 5);
+        doc.y = y + 18;
+      };
 
-        doc.y = tableY + 18;
+      if (insuredPersons.length > 0 || (policyholder && policyholder.policyholderName)) {
+        ensureSpace(42);
+        renderInsuredTableHeader(doc.y);
 
         if (insuredPersons.length > 0) {
           insuredPersons.forEach((person, idx) => {
-            checkPageBreak(rowHeight);
+            const cleanName = cleanCurrency(person.name) || 'Covered Member';
+            const cleanRel = cleanCurrency(person.relationship) || 'Self / Primary';
+            const cleanAge = person.age ? `${person.age} yrs` : '—';
+            const cleanGender = person.gender || '—';
+            const cleanSI = cleanCurrency(person.sumInsured) || pSumInsured;
+
+            doc.font('Helvetica-Bold').fontSize(7.5);
+            const nameH = doc.heightOfString(cleanName, { width: 145, lineGap: 1 });
+            doc.font('Helvetica').fontSize(7.5);
+            const relH = doc.heightOfString(cleanRel, { width: 90, lineGap: 1 });
+            const rowH = Math.max(Math.ceil(Math.max(nameH, relH)) + 8, 20);
+
+            const didBreak = ensureSpace(rowH + 2);
+            if (didBreak) {
+              renderInsuredTableHeader(doc.y);
+            }
+
             const curRowY = doc.y;
 
             if (idx % 2 === 1) {
-              doc.rect(leftMargin, curRowY, pageWidth, rowHeight).fill('#F8FAFC');
+              doc.rect(leftMargin, curRowY, pageWidth, rowH).fill('#F8FAFC');
             }
-            doc.rect(leftMargin, curRowY + rowHeight - 1, pageWidth, 1).fill('#F1F5F9');
+            doc.rect(leftMargin, curRowY + rowH - 1, pageWidth, 1).fill('#F1F5F9');
 
             doc.fillColor(primaryDark).fontSize(7.5).font('Helvetica-Bold')
-              .text(cleanCurrency(person.name) || 'Covered Member', leftMargin + 8, curRowY + 4, { width: 145, ellipsis: true });
+              .text(cleanName, leftMargin + 8, curRowY + 4, { width: 145, lineGap: 1 });
 
             doc.fillColor(textSecondary).font('Helvetica')
-              .text(cleanCurrency(person.relationship) || 'Self / Primary', leftMargin + 160, curRowY + 4, { width: 90, ellipsis: true });
+              .text(cleanRel, leftMargin + 160, curRowY + 4, { width: 90, lineGap: 1 });
 
-            doc.text(person.age ? `${person.age} yrs` : '—', leftMargin + 260, curRowY + 4, { width: 60 });
-            doc.text(person.gender || '—', leftMargin + 325, curRowY + 4, { width: 70 });
-            doc.text(cleanCurrency(person.sumInsured) || pSumInsured, leftMargin + 400, curRowY + 4, { width: 105, ellipsis: true });
+            doc.text(cleanAge, leftMargin + 260, curRowY + 4, { width: 60 });
+            doc.text(cleanGender, leftMargin + 325, curRowY + 4, { width: 70 });
+            doc.text(cleanSI, leftMargin + 400, curRowY + 4, { width: 105, lineGap: 1 });
 
-            doc.y = curRowY + rowHeight;
+            doc.y = curRowY + rowH;
           });
         } else if (policyholder && policyholder.policyholderName) {
-          checkPageBreak(rowHeight);
+          const cleanName = cleanCurrency(policyholder.policyholderName);
+          const cleanAge = policyholder.age ? `${policyholder.age}` : '—';
+          const cleanGender = policyholder.gender || '—';
+          const cleanId = cleanCurrency(policyholder.memberId) || pSumInsured;
+
+          doc.font('Helvetica-Bold').fontSize(7.5);
+          const nameH = doc.heightOfString(cleanName, { width: 145, lineGap: 1 });
+          const rowH = Math.max(nameH + 8, 20);
+
+          ensureSpace(rowH + 2);
           const curRowY = doc.y;
-          doc.rect(leftMargin, curRowY + rowHeight - 1, pageWidth, 1).fill('#F1F5F9');
+
+          doc.rect(leftMargin, curRowY + rowH - 1, pageWidth, 1).fill('#F1F5F9');
           doc.fillColor(primaryDark).fontSize(7.5).font('Helvetica-Bold')
-            .text(cleanCurrency(policyholder.policyholderName), leftMargin + 8, curRowY + 4, { width: 145, ellipsis: true });
+            .text(cleanName, leftMargin + 8, curRowY + 4, { width: 145, lineGap: 1 });
           doc.fillColor(textSecondary).font('Helvetica')
             .text('Policyholder / Self', leftMargin + 160, curRowY + 4, { width: 90 });
-          doc.text(policyholder.age ? `${policyholder.age}` : '—', leftMargin + 260, curRowY + 4, { width: 60 });
-          doc.text(policyholder.gender || '—', leftMargin + 325, curRowY + 4, { width: 70 });
-          doc.text(cleanCurrency(policyholder.memberId) || pSumInsured, leftMargin + 400, curRowY + 4, { width: 105, ellipsis: true });
-          doc.y = curRowY + rowHeight;
+          doc.text(cleanAge, leftMargin + 260, curRowY + 4, { width: 60 });
+          doc.text(cleanGender, leftMargin + 325, curRowY + 4, { width: 70 });
+          doc.text(cleanId, leftMargin + 400, curRowY + 4, { width: 105, lineGap: 1 });
+          doc.y = curRowY + rowH;
         }
 
-        doc.y += 10;
+        doc.y += 8;
       } else {
-        const noteHeight = 28;
-        checkPageBreak(noteHeight);
+        const noteText = 'Personal member details (such as specific names, ages, and certificate numbers) are not mentioned in this policy document. Individual details are specified in your individual Policy Schedule or Member Certificate.';
+        doc.font('Helvetica').fontSize(7.2);
+        const noteTextH = doc.heightOfString(noteText, { width: pageWidth - 20, lineGap: 1.5 });
+        const noteHeight = Math.ceil(noteTextH + 14);
+
+        ensureSpace(noteHeight + 4);
         const noteY = doc.y;
+
         doc.roundedRect(leftMargin, noteY, pageWidth, noteHeight, 4)
           .fillAndStroke('#F8FAFC', borderCard);
 
         doc.fillColor(textMuted).fontSize(7.2).font('Helvetica')
-          .text(
-            'Personal member details (such as specific names, ages, and certificate numbers) are not mentioned in this policy document. Individual details are specified in your individual Policy Schedule or Member Certificate.',
-            leftMargin + 8,
-            noteY + 6,
-            { width: pageWidth - 16 }
-          );
+          .text(noteText, leftMargin + 10, noteY + 7, { width: pageWidth - 20, lineGap: 1.5 });
 
-        doc.y = noteY + noteHeight + 10;
+        doc.y = noteY + noteHeight + 8;
       }
 
       // =====================================================================
@@ -312,30 +488,13 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
           ];
 
       coverageItems.forEach((item) => {
-        const itemH = 34;
-        checkPageBreak(itemH);
-        const itemY = doc.y;
-
-        doc.roundedRect(leftMargin, itemY, pageWidth, itemH, 4)
-          .fillAndStroke(bgCard, borderCard);
-
-        doc.roundedRect(leftMargin, itemY, 3, itemH, 1).fill(brandEmerald);
-
-        doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold')
-          .text(cleanCurrency(item.title) || 'Coverage Benefit', leftMargin + 8, itemY + 5, { width: pageWidth - 90 });
-
-        if (item.sourcePage) {
-          doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
-            .text(`Source: Policy page ${item.sourcePage}`, leftMargin + pageWidth - 100, itemY + 5, { width: 90, align: 'right' });
-        }
-
-        doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(cleanCurrency(item.simpleExplanation) || 'Standard policy coverage condition.', leftMargin + 8, itemY + 17, { width: pageWidth - 16 });
-
-        doc.y = itemY + itemH + 5;
+        renderDynamicItemCard({
+          title: item.title || 'Coverage Benefit',
+          explanation: item.simpleExplanation || 'Standard policy coverage condition.',
+          sourcePage: item.sourcePage || null,
+          accentColor: brandEmerald
+        });
       });
-
-      doc.y += 5;
 
       // =====================================================================
       // 6. KEY BENEFITS & VALUE ADDS
@@ -353,35 +512,18 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
           ];
 
       benefitItems.forEach((item) => {
-        const itemH = 34;
-        checkPageBreak(itemH);
-        const itemY = doc.y;
-
-        doc.roundedRect(leftMargin, itemY, pageWidth, itemH, 4)
-          .fillAndStroke(bgCard, borderCard);
-
-        doc.roundedRect(leftMargin, itemY, 3, itemH, 1).fill('#3B82F6');
-
-        doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold')
-          .text(cleanCurrency(item.title) || 'Key Benefit', leftMargin + 8, itemY + 5, { width: pageWidth - 90 });
-
-        if (item.sourcePage) {
-          doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
-            .text(`Source: Policy page ${item.sourcePage}`, leftMargin + pageWidth - 100, itemY + 5, { width: 90, align: 'right' });
-        }
-
-        doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(cleanCurrency(item.simpleExplanation) || 'Value added policy benefit.', leftMargin + 8, itemY + 17, { width: pageWidth - 16 });
-
-        doc.y = itemY + itemH + 5;
+        renderDynamicItemCard({
+          title: item.title || 'Key Benefit',
+          explanation: item.simpleExplanation || 'Value added policy benefit.',
+          sourcePage: item.sourcePage || null,
+          accentColor: '#3B82F6'
+        });
       });
-
-      doc.y += 5;
 
       // =====================================================================
       // 7. WAITING PERIODS (Structured Table)
       // =====================================================================
-      renderSectionHeading('Waiting Periods');
+      renderSectionHeading('Waiting Periods', 60);
 
       const waitingItems = Array.isArray(analysis.waitingPeriods) && analysis.waitingPeriods.length > 0
         ? analysis.waitingPeriods
@@ -394,25 +536,41 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
             }
           ];
 
-      checkPageBreak(20 + waitingItems.length * 24);
-      const wpHeaderY = doc.y;
-      doc.roundedRect(leftMargin, wpHeaderY, pageWidth, 18, 4).fill('#F1F5F9');
-      doc.fillColor(primaryDark).fontSize(7.2).font('Helvetica-Bold');
-      doc.text('WAITING PERIOD TYPE', leftMargin + 8, wpHeaderY + 5);
-      doc.text('DURATION', leftMargin + 160, wpHeaderY + 5);
-      doc.text('WHAT IT MEANS FOR YOU', leftMargin + 240, wpHeaderY + 5);
-      doc.text('SOURCE', leftMargin + pageWidth - 65, wpHeaderY + 5, { width: 55, align: 'right' });
+      const renderWaitingTableHeader = (y) => {
+        doc.roundedRect(leftMargin, y, pageWidth, 18, 4).fill('#F1F5F9');
+        doc.fillColor(primaryDark).fontSize(7.2).font('Helvetica-Bold');
+        doc.text('WAITING PERIOD TYPE', leftMargin + 8, y + 5);
+        doc.text('DURATION', leftMargin + 155, y + 5);
+        doc.text('WHAT IT MEANS FOR YOU', leftMargin + 235, y + 5);
+        doc.text('SOURCE', leftMargin + pageWidth - 65, y + 5, { width: 55, align: 'right' });
+        doc.y = y + 18;
+      };
 
-      doc.y = wpHeaderY + 18;
+      ensureSpace(45);
+      renderWaitingTableHeader(doc.y);
 
       waitingItems.forEach((wp, idx) => {
         const title = cleanCurrency(wp.periodName || wp.title || 'Waiting Period');
         const duration = cleanCurrency(wp.duration || 'Specified in Policy');
-        const expl = cleanCurrency(wp.explanation || wp.simpleExplanation || 'Waiting period condition.');
+        const expl = cleanCurrency(wp.explanation || wp.simpleExplanation || 'Waiting period condition applies.');
         const source = wp.sourcePage ? `Page ${wp.sourcePage}` : '—';
 
-        const rowH = 24;
-        checkPageBreak(rowH);
+        doc.font('Helvetica-Bold').fontSize(7.5);
+        const titleH = doc.heightOfString(title, { width: 140, lineGap: 1 });
+
+        doc.font('Helvetica-Bold').fontSize(7.2);
+        const durH = doc.heightOfString(duration, { width: 75, lineGap: 1 });
+
+        doc.font('Helvetica').fontSize(7.2);
+        const explH = doc.heightOfString(expl, { width: 205, lineGap: 1.4 });
+
+        const rowH = Math.max(Math.ceil(Math.max(titleH, durH, explH)) + 8, 22);
+
+        const didBreak = ensureSpace(rowH + 2);
+        if (didBreak) {
+          renderWaitingTableHeader(doc.y);
+        }
+
         const curRowY = doc.y;
 
         if (idx % 2 === 1) {
@@ -421,13 +579,13 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
         doc.rect(leftMargin, curRowY + rowH - 1, pageWidth, 1).fill('#F1F5F9');
 
         doc.fillColor(primaryDark).fontSize(7.5).font('Helvetica-Bold')
-          .text(title, leftMargin + 8, curRowY + 4, { width: 145, ellipsis: true });
+          .text(title, leftMargin + 8, curRowY + 4, { width: 140, lineGap: 1 });
 
         doc.fillColor('#D97706').fontSize(7.2).font('Helvetica-Bold')
-          .text(duration, leftMargin + 160, curRowY + 4, { width: 75 });
+          .text(duration, leftMargin + 155, curRowY + 4, { width: 75, lineGap: 1 });
 
         doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(expl, leftMargin + 240, curRowY + 4, { width: pageWidth - 315 });
+          .text(expl, leftMargin + 235, curRowY + 4, { width: 205, lineGap: 1.4 });
 
         doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
           .text(source, leftMargin + pageWidth - 65, curRowY + 4, { width: 55, align: 'right' });
@@ -435,7 +593,7 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
         doc.y = curRowY + rowH;
       });
 
-      doc.y += 10;
+      doc.y += 8;
 
       // =====================================================================
       // 8. LIMITS, SUB-LIMITS & CONDITIONS
@@ -454,33 +612,17 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
           ];
 
       limitItems.forEach((item) => {
-        const itemH = 34;
-        checkPageBreak(itemH);
-        const itemY = doc.y;
+        const title = item.conditionName || item.title || 'Policy Condition';
+        const subtitle = item.limitValue ? `Limit / Condition: ${item.limitValue}` : '';
 
-        doc.roundedRect(leftMargin, itemY, pageWidth, itemH, 4)
-          .fillAndStroke(bgCard, borderCard);
-
-        doc.roundedRect(leftMargin, itemY, 3, itemH, 1).fill('#F59E0B');
-
-        const title = cleanCurrency(item.conditionName || item.title || 'Policy Condition');
-        const limitTag = item.limitValue ? ` [Limit: ${cleanCurrency(item.limitValue)}]` : '';
-
-        doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold')
-          .text(`${title}${limitTag}`, leftMargin + 8, itemY + 5, { width: pageWidth - 90 });
-
-        if (item.sourcePage) {
-          doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
-            .text(`Source: Policy page ${item.sourcePage}`, leftMargin + pageWidth - 100, itemY + 5, { width: 90, align: 'right' });
-        }
-
-        doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(cleanCurrency(item.simpleExplanation) || 'Policy restriction applies.', leftMargin + 8, itemY + 17, { width: pageWidth - 16 });
-
-        doc.y = itemY + itemH + 5;
+        renderDynamicItemCard({
+          title,
+          subtitle,
+          explanation: item.simpleExplanation || 'Policy restriction applies.',
+          sourcePage: item.sourcePage || null,
+          accentColor: '#F59E0B'
+        });
       });
-
-      doc.y += 5;
 
       // =====================================================================
       // 9. WHAT'S NOT COVERED (EXCLUSIONS)
@@ -498,30 +640,13 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
           ];
 
       exclusionItems.forEach((item) => {
-        const itemH = 34;
-        checkPageBreak(itemH);
-        const itemY = doc.y;
-
-        doc.roundedRect(leftMargin, itemY, pageWidth, itemH, 4)
-          .fillAndStroke(bgCard, borderCard);
-
-        doc.roundedRect(leftMargin, itemY, 3, itemH, 1).fill('#EF4444');
-
-        doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold')
-          .text(cleanCurrency(item.title) || 'Exclusion', leftMargin + 8, itemY + 5, { width: pageWidth - 90 });
-
-        if (item.sourcePage) {
-          doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
-            .text(`Source: Policy page ${item.sourcePage}`, leftMargin + pageWidth - 100, itemY + 5, { width: 90, align: 'right' });
-        }
-
-        doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(cleanCurrency(item.simpleExplanation) || 'This item is excluded under policy terms.', leftMargin + 8, itemY + 17, { width: pageWidth - 16 });
-
-        doc.y = itemY + itemH + 5;
+        renderDynamicItemCard({
+          title: item.title || 'Exclusion',
+          explanation: item.simpleExplanation || 'This item is excluded under policy terms.',
+          sourcePage: item.sourcePage || null,
+          accentColor: '#EF4444'
+        });
       });
-
-      doc.y += 5;
 
       // =====================================================================
       // 10. IMPORTANT THINGS YOU SHOULD KNOW
@@ -544,51 +669,36 @@ export function generateEasyPolicyPdf(analysis, originalFileName, outputPath) {
           ];
 
       importantItems.forEach((item) => {
-        const itemH = 34;
-        checkPageBreak(itemH);
-        const itemY = doc.y;
-
-        doc.roundedRect(leftMargin, itemY, pageWidth, itemH, 4)
-          .fillAndStroke(bgCard, borderCard);
-
-        doc.roundedRect(leftMargin, itemY, 3, itemH, 1).fill('#8B5CF6');
-
-        doc.fillColor(primaryDark).fontSize(8).font('Helvetica-Bold')
-          .text(cleanCurrency(item.title) || 'Important Rule', leftMargin + 8, itemY + 5, { width: pageWidth - 90 });
-
-        if (item.sourcePage) {
-          doc.fillColor(textMuted).fontSize(6.8).font('Helvetica')
-            .text(`Source: Policy page ${item.sourcePage}`, leftMargin + pageWidth - 100, itemY + 5, { width: 90, align: 'right' });
-        }
-
-        doc.fillColor(textSecondary).fontSize(7.2).font('Helvetica')
-          .text(cleanCurrency(item.simpleExplanation) || 'Policy claim rule.', leftMargin + 8, itemY + 17, { width: pageWidth - 16 });
-
-        doc.y = itemY + itemH + 5;
+        renderDynamicItemCard({
+          title: item.title || 'Important Rule',
+          explanation: item.simpleExplanation || 'Policy claim rule applies.',
+          sourcePage: item.sourcePage || null,
+          accentColor: '#8B5CF6'
+        });
       });
 
       // =====================================================================
       // 11. DISCLAIMER BOX
       // =====================================================================
-      const disclaimerH = 40;
-      checkPageBreak(disclaimerH);
-      doc.y += 5;
+      renderSectionHeading('Important Disclaimer & Notice', 45);
 
+      const disclText = 'This document is an easy-language explanation generated from the uploaded policy document. It is intended to help you understand your policy more easily and does not replace the original policy wording. In case of any difference, refer to the original policy document and its applicable terms and conditions.';
+
+      doc.font('Helvetica').fontSize(7);
+      const disclTextH = doc.heightOfString(disclText, { width: pageWidth - 20, lineGap: 1.5 });
+      const disclaimerH = Math.ceil(disclTextH + 18);
+
+      ensureSpace(disclaimerH + 8);
       const disclaimerY = doc.y;
 
       doc.roundedRect(leftMargin, disclaimerY, pageWidth, disclaimerH, 4)
         .fillAndStroke(amberBg, amberBorder);
 
-      doc.fillColor(amberText).fontSize(6.8).font('Helvetica-Bold')
-        .text('IMPORTANT DISCLAIMER & NOTICE', leftMargin + 8, disclaimerY + 5);
+      doc.fillColor(amberText).fontSize(7).font('Helvetica-Bold')
+        .text('NOTICE & DISCLAIMER', leftMargin + 10, disclaimerY + 6);
 
-      doc.fillColor('#78350F').fontSize(6.5).font('Helvetica')
-        .text(
-          'This document is an easy-language explanation generated from the uploaded policy document. It is intended to help you understand your policy more easily and does not replace the original policy wording. In case of any difference, refer to the original policy document and its applicable terms and conditions.',
-          leftMargin + 8,
-          disclaimerY + 15,
-          { width: pageWidth - 16 }
-        );
+      doc.fillColor('#78350F').fontSize(7).font('Helvetica')
+        .text(disclText, leftMargin + 10, disclaimerY + 16, { width: pageWidth - 20, lineGap: 1.5 });
 
       doc.y = disclaimerY + disclaimerH + 10;
 

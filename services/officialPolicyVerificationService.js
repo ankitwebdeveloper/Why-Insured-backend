@@ -179,14 +179,14 @@ export const CURATED_OFFICIAL_CATALOG = [
       },
       restoration: {
         feature: 'Cumulative Bonus & Restoration',
-        clause: 'Automatic restoration of Sum Insured up to 100% once in a policy year upon complete exhaustion of the Base Sum Insured for unrelated illnesses.',
-        simple: 'Refills your entire sum insured once per year if it gets exhausted, applicable for unrelated illnesses.',
+        clause: 'Restore Infinity Plus: Provides unlimited 100% restorations of the Base Sum Insured for subsequent related or unrelated claims within the same policy year for future hospitalizations.',
+        simple: 'Provides unlimited 100% restorations of the Base Sum Insured for subsequent related or unrelated claims within the same policy year for future hospitalizations.',
         sourcePage: 11
       },
       waitingPeriod: {
         feature: 'Waiting Periods',
-        clause: '30 Days Initial Waiting Period. 24 Months for specific illnesses. 24–36 Months for Pre-Existing Diseases declared and accepted at inception.',
-        simple: '30 days initial wait, 2 years for specific surgeries, and 2 to 3 years for pre-existing diseases.',
+        clause: '30 days initial waiting period for illness-related claims (accidents are covered as per policy terms). 24 months for listed diseases and procedures. 36 months for pre-existing diseases.',
+        simple: '30 days initial wait for illness-related claims, 24 months for listed diseases and procedures, and 36 months for pre-existing diseases.',
         sourcePage: 16
       },
       consumables: {

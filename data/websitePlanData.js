@@ -28,49 +28,48 @@ export const WEBSITE_PLANS_KNOWLEDGE = [
     prePostHospitalization: {
       preDays: 90,
       postDays: 90,
-      preSummary: 'Pre-Hospitalisation expenses covered up to 90 days before hospital admission.',
-      postSummary: 'Post-Hospitalisation expenses covered up to 90 days after hospital discharge.',
-      details: 'Covers eligible medical expenses including doctor consultations, prescribed medicines/pharmacy expenses, and diagnostic/lab tests.',
-      condition: 'Covered when the in-patient hospitalisation claim is admissible and approved under the policy terms. These are not standalone OPD expenses.'
+      preSummary: 'Up to 90 days before admission.',
+      postSummary: 'Up to 90 days after discharge.',
+      details: 'Covers eligible medical costs like consultations, pharmacy, and lab tests up to 90 days before admission and up to 90 days after discharge (only applicable if the hospitalization claim is covered).',
+      condition: 'Only applicable if the hospitalization claim is covered.'
     },
     roomCategory: {
-      summary: 'Single Private Room / Twin Sharing / Any Room depending on the selected variant with zero rent capping.',
-      standardVariant: 'Single Private Room covered with zero capping (no daily rent sub-limit, no proportionate deduction).',
-      smartVariant: 'Twin Sharing room covered across Value Provider Network (VPN) hospitals.',
+      summary: 'Features specific room choices as outlined in the policy terms.',
+      standardVariant: 'Features specific room choices as outlined in the policy terms.',
+      smartVariant: 'Twin Sharing room option for a lower premium.',
       eliteVariant: 'Any Room Category covered with zero capping.',
-      icuCharges: 'Zero capping / no limit on ICU charges.',
-      proportionateDeduction: 'No proportionate deductions on Single Private Room in Standard variant.'
+      icuCharges: 'No sublimits on ICU charges.',
+      proportionateDeduction: 'No proportionate deduction within eligible room category.'
     },
     restoration: {
       name: 'Restore Infinity Plus',
-      frequency: 'Unlimited restorations during a policy year.',
+      frequency: 'Unlimited 100% restorations within the same policy year.',
       amount: '100% of Base Sum Insured.',
-      illnessType: 'Restores for both related and unrelated illnesses.',
-      rule: 'Restore Infinity Plus is available for your subsequent hospitalisation, not the same continuous hospitalisation.',
-      example: '₹10 Lakh Base SI → ₹10 Lakh Restored → ₹10 Lakh Restored Again → Unlimited Times in policy year.'
+      illnessType: 'Subsequent related or unrelated claims within the same policy year for future hospitalizations.',
+      summary: 'Provides unlimited 100% restorations of the Base Sum Insured for subsequent related or unrelated claims within the same policy year for future hospitalizations.'
     },
     waitingPeriods: {
       initialDays: 30,
-      initialSummary: 'Initial Waiting Period: 30 days (accidental injury covered from Day 1).',
+      initialSummary: '30 days for illness-related claims (accidents are covered as per policy terms).',
       specificMonths: 24,
-      specificSummary: 'Specified Disease/Procedure Waiting Period: 24 months (e.g. cataract, hernia, joint replacement, stones).',
+      specificSummary: '24 months for listed diseases and procedures.',
       pedMonths: 36,
-      pedSummary: 'Pre-Existing Diseases (PED) Waiting Period: 36 months (or 48 months as per variant; 24 months on Select Elite).',
-      permanentExclusions: 'Any existing condition specifically listed as a Permanent Exclusion in the Policy Schedule.'
+      pedSummary: '36 months.',
+      permanentExclusions: 'Any existing diseases specifically outlined as permanent exclusions in the policy schedule are not covered.'
     },
     noClaimBonus: {
-      summary: 'Cumulative Bonus of 50% to 100% for every claim-free year (up to max 100% of Base SI). Alternatively, 1% renewal premium discount.',
-      rider: 'Supercharge Bonus Rider available to boost cumulative bonus up to 5X.'
+      summary: 'Choose between a Cumulative Bonus (50% to 100% increase in Base Sum Insured for every claim-free year) OR a 1% Renewal Premium Discount per claim-free year.',
+      rider: 'Increases the bonus by 100% to 500% of the Base Sum Insured irrespective of claims.'
     },
     copayAndSublimits: {
-      copay: 'No Co-pay: You do not have to pay a fixed percentage of the eligible hospital bill.',
-      sublimits: 'No Sub-limits: No separate fixed rupee cap on eligible surgeries, room rents, or medical procedures.'
+      copay: 'No Co-pay (no fixed percentage of the bill to pay).',
+      sublimits: 'No Sublimits (no separate fixed limits on specific surgeries or treatments).'
     },
     dayCare: {
-      summary: 'All Day Care procedures covered where treatment takes less than 24 hours of hospitalisation.'
+      summary: 'Covers eligible treatments and surgeries that require less than 24 hours of hospitalization.'
     },
     consumables: {
-      summary: 'Available as an Optional Consumables Benefit rider covering surgical gloves, masks, PPE kits, nebulizer kits, and syringes.'
+      summary: 'Covers non-medical expenses like gloves, syringes, and cotton to lower out-of-pocket costs.'
     },
     companyStrength: {
       csr: '89.5% (Average 3-year Claim Settlement Ratio)',
